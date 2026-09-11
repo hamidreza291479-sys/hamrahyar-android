@@ -1,0 +1,67 @@
+package com.lucifer.hamrahyar.ui.theme.utils
+
+object FormLabelMapper {
+    private val labelMap = mapOf(
+        "target_mobile" to "شماره همراه مقصد",
+        "target_phone" to "شماره تماس مقصد",
+        "amount" to "مبلغ",
+        "price" to "قیمت",
+        "description" to "توضیحات",
+        "address" to "آدرس",
+        "postal_code" to "کد پستی",
+        "national_id" to "کد ملی",
+        "national_code" to "کد ملی",
+        "id_number" to "شماره شناسنامه",
+        "first_name" to "نام",
+        "last_name" to "نام خانوادگی",
+        "father_name" to "نام پدر",
+        "birth_date" to "تاریخ تولد",
+        "gender" to "جنسیت",
+        "province" to "استان",
+        "city" to "شهر",
+        "plate_number" to "شماره پلاک",
+        "vin" to "شماره VIN",
+        "chassis_number" to "شماره شاسی",
+        "engine_number" to "شماره موتور",
+        "card_number" to "شماره کارت",
+        "account_number" to "شماره حساب",
+        "sheba" to "شماره شبا",
+        "company_name" to "نام شرکت",
+        "registration_number" to "شماره ثبت",
+        "established_date" to "تاریخ تاسیس",
+        "type" to "نوع",
+        "category" to "دسته بندی",
+        "priority" to "اولویت",
+        "tracking_code" to "کد پیگیری",
+        "mobile" to "شماره همراه",
+        "full_name" to "نام و نام خانوادگی",
+        "email" to "ایمیل",
+        "message" to "پیام",
+        "subject" to "موضوع",
+        "title" to "عنوان",
+        "date" to "تاریخ",
+        "time" to "زمان",
+        "count" to "تعداد",
+        "password" to "رمز عبور",
+        "confirm_password" to "تکرار رمز عبور",
+        "car_model" to "مدل خودرو",
+        "car_color" to "رنگ خودرو",
+        "birth_place" to "محل تولد",
+        "issue_place" to "محل صدور",
+        "education_level" to "مقطع تحصیلی",
+        "major" to "رشته تحصیلی",
+        "university" to "دانشگاه",
+        "phone" to "شماره تماس",
+        "mobile_number" to "شماره همراه",
+        "full_name" to "نام و نام خانوادگی",
+        "serial_number" to "شماره سریال",
+        "certificate_number" to "شماره گواهینامه",
+        "passport_number" to "شماره گذرنامه",
+        "tracking_number" to "شماره پیگیری"
+    )
+
+    fun map(key: String): String {
+        val normalizedKey = key.lowercase().trim()
+        return labelMap[normalizedKey] ?: labelMap[key.replace(" ", "_").lowercase()] ?: key.replace("_", " ")
+    }
+}

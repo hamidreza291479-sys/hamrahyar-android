@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Outer Glow -->
+    <path
+        android:pathData="M35,30 L35,78 M73,30 L73,78 M35,54 L73,54"
+        android:strokeWidth="8"
+        android:strokeLineCap="round"
+        android:strokeColor="#336C5CE7" />
+
+    <!-- Main H Shape -->
+    <path
+        android:pathData="M35,30 L35,78 M73,30 L73,78 M35,54 L73,54"
+        android:strokeWidth="4.5"
+        android:strokeLineCap="round">
+        <aapt:attr name="android:strokeColor">
+            <gradient
+                android:endX="73"
+                android:endY="78"
+                android:startX="35"
+                android:startY="30"
+                android:type="linear">
+                <item android:color="#a29bfe" android:offset="0" />
+                <item android:color="#6C5CE7" android:offset="1" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Tech Dots -->
+    <path
+        android:fillColor="#a29bfe"
+        android:pathData="M35,30 m-2,0 a2,2 0 1,1 4,0 a2,2 0 1,1 -4,0" />
+    <path
+        android:fillColor="#a29bfe"
+        android:pathData="M73,30 m-2,0 a2,2 0 1,1 4,0 a2,2 0 1,1 -4,0" />
+    <path
+        android:fillColor="#6C5CE7"
+        android:pathData="M35,78 m-2,0 a2,2 0 1,1 4,0 a2,2 0 1,1 -4,0" />
+    <path
+        android:fillColor="#6C5CE7"
+        android:pathData="M73,78 m-2,0 a2,2 0 1,1 4,0 a2,2 0 1,1 -4,0" />
+
+</vector>
