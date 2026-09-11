@@ -253,7 +253,16 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
                 val orderDto = summary.order
                 val adminDto = summary.admin
                 val orderId = orderDto.id!!
-                val conversationId = getConversationForOrder(orderId).getOrNull()
+                
+                val conversationId = orderDto.conversationId ?: run {
+                    Log.d(TAG, "OrderRepository: conversation lookup fallback for orderId=$orderId")
+                    getConversationForOrder(orderId).getOrNull()
+                }
+
+                if (orderDto.conversationId != null) {
+                    Log.d(TAG, "OrderRepository: conversation_id received from server")
+                }
+                Log.d(TAG, "OrderRepository: orderId=$orderId, conversationId=$conversationId")
                 
                 val active = ActiveService(
                     accessId = orderId, orderId = orderId,
@@ -320,6 +329,7 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
     override fun getMessages(conversationId: String, profileId: String): Flow<List<ChatMessage>> = callbackFlow {
         ensureAuthSession()
         var currentList = emptyList<ChatMessage>()
+        Log.d(TAG, "OrderRepository: subscribing to messages conversation=$conversationId")
         val channel = client.realtime.channel("chat_$conversationId")
         val changeFlow = channel.postgresChangeFlow<PostgresAction>(schema = "public") { 
             table = "messages" 
@@ -450,13 +460,36 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
     override fun observeConversations(orderId: String): Flow<BindOrderResult> = emptyFlow()
 
     override suspend fun getConversationForOrder(orderId: String): Result<String?> {
-        return try {
-            val conv = client.from("conversations").select {
-                filter { eq("order_id", orderId) }
-                limit(1)
-            }.decodeSingleOrNull<ConversationDto>()
-            Result.success(conv?.id)
-        } catch (e: Exception) { Result.failure(e) }
+        val retries = listOf(300L, 700L, 1500L)
+        var attempt = 0
+        
+        while (true) {
+            try {
+                val conv = client.from("conversations").select {
+                    filter { eq("order_id", orderId) }
+                    limit(1)
+                }.decodeSingleOrNull<ConversationDto>()
+                
+                if (conv != null) {
+                    Log.d(TAG, "OrderRepository: conversation resolved")
+                    return Result.success(conv.id)
+                }
+                
+                if (attempt >= retries.size) {
+                    Log.w(TAG, "OrderRepository: conversation lookup fallback failed after ${retries.size} attempts for orderId=$orderId")
+                    return Result.success(null)
+                }
+                
+                Log.d(TAG, "OrderRepository: conversation retry attempt=${attempt + 1}")
+                delay(retries[attempt])
+                attempt++
+            } catch (e: Exception) {
+                Log.e(TAG, "OrderRepository: conversation lookup error for orderId=$orderId: ${e.message}")
+                if (attempt >= retries.size) return Result.failure(e)
+                delay(retries[attempt])
+                attempt++
+            }
+        }
     }
 
     override fun observeServices(): Flow<Unit> = emptyFlow()
@@ -468,14 +501,30 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
         var activeChannel: RealtimeChannel? = null
         
         val job = launch {
-            val conversationId = getConversationForOrder(orderId).getOrNull()
+            Log.d(TAG, "OrderRepository: starting observeFormRequests for orderId=$orderId")
+            
+            var conversationId: String? = null
+            
+            // Try fetching active order summary first to get conversation_id efficiently
+            val guestKey = getOrCreateGuestKey()
+            getMyActiveOrder(guestKey).onSuccess { active ->
+                if (active?.orderId == orderId) {
+                    conversationId = active.conversationId
+                }
+            }
+            
             if (conversationId == null) {
-                Log.w(TAG, "observeFormRequests: No conversation found for order $orderId")
+                Log.d(TAG, "OrderRepository: conversationId not in current active order, trying fallback for orderId=$orderId")
+                conversationId = getConversationForOrder(orderId).getOrNull()
+            }
+            
+            if (conversationId == null) {
+                Log.e(TAG, "OrderRepository: Failed to resolve conversationId for orderId=$orderId after retries")
                 trySend(emptyList())
-                close()
                 return@launch
             }
 
+            Log.d(TAG, "OrderRepository: subscribing to forms conversation=$conversationId")
             val channel = client.realtime.channel("forms_$conversationId")
             activeChannel = channel
             
@@ -596,7 +645,11 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
             
             val orderDto = dto.order
             val activeOrder = if (orderDto?.id != null) {
-                val conversationId = getConversationForOrder(orderDto.id).getOrNull()
+                val conversationId = orderDto.conversationId ?: run {
+                    Log.d(TAG, "OrderRepository: conversation lookup fallback")
+                    getConversationForOrder(orderDto.id).getOrNull()
+                }
+
                 ActiveService(
                     accessId = orderDto.id, orderId = orderDto.id,
                     conversationId = conversationId,

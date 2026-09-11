@@ -58,6 +58,7 @@ data class OrderDto(
     val status: String? = null,
     @SerialName("form_data") val formData: JsonObject? = null,
     @SerialName("customer_order_number") val customerOrderNumber: String? = null,
+    @SerialName("conversation_id") val conversationId: String? = null,
     @SerialName("assigned_operator_id") val assignedOperatorId: String? = null,
     @SerialName("fixed_amount") val fixedAmount: Double = 0.0,
     @SerialName("external_amount") val externalAmount: Double = 0.0,

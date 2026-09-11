@@ -267,6 +267,7 @@ fun AppNavigator(repository: OnlineServiceRepository) {
                     activeRequest = activeRequest?.copy(
                         status = ServiceStatus.fromValue(updated.status),
                         lastUpdate = updated.lastValidatedAt,
+                        conversationId = updated.conversationId,
                         adminName = updated.adminName,
                         adminAvatar = updated.adminAvatar,
                         adminRole = updated.adminRole,
