@@ -41,6 +41,7 @@ import androidx.compose.ui.unit.sp
 import com.lucifer.hamrahyar.ui.theme.Lalezar
 import com.lucifer.hamrahyar.ui.theme.Vazir
 import com.lucifer.hamrahyar.ui.theme.data.model.FormRequestDto
+import com.lucifer.hamrahyar.ui.theme.data.model.FormResponseDto
 import com.lucifer.hamrahyar.ui.theme.domain.model.*
 import com.lucifer.hamrahyar.ui.theme.domain.repository.OnlineServiceRepository
 import kotlinx.coroutines.flow.collectLatest
@@ -65,9 +66,11 @@ fun ChatScreen(
     var showOrderDetails by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     var formRequests by remember { mutableStateOf<List<FormRequestDto>>(emptyList()) }
+    var formResponses by remember { mutableStateOf<List<FormResponseDto>>(emptyList()) }
     
     LaunchedEffect(request.id) {
-        repository.observeFormRequests(request.id).collectLatest { formRequests = it }
+        launch { repository.observeFormRequests(request.id).collectLatest { formRequests = it } }
+        launch { repository.observeFormResponses(request.id).collectLatest { formResponses = it } }
     }
     val listState = rememberLazyListState()
     
@@ -252,8 +255,9 @@ fun ChatScreen(
                     items(messages.reversed(), key = { it.id }) { message ->
                         if (message.type == "form") {
                             val form = formRequests.find { it.messageId == message.id }
+                            val response = formResponses.find { it.requestId == form?.id }
                             if (form != null) {
-                                FormRequestCard(form) { data ->
+                                FormRequestCard(form, response) { data ->
                                     scope.launch {
                                         repository.submitFormResponse(form.id, request.id, data)
                                     }

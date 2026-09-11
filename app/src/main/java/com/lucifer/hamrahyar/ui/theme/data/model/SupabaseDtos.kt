@@ -3,6 +3,7 @@ package com.lucifer.hamrahyar.ui.theme.data.model
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 @Serializable
 data class CategoryDto(
@@ -328,15 +329,24 @@ data class AdminUserPresenceDto(
 @Serializable
 data class FormRequestDto(
     val id: String,
-    @SerialName("order_id") val orderId: String,
+    @SerialName("conversation_id") val conversationId: String,
     @SerialName("message_id") val messageId: String? = null,
-    val type: String, // numeric, vehicle_plate, motorcycle_plate, timed, text, file, delivery_method, invoice, card_to_card_payment, end_service_summary, survey
-    val prompt: String,
+    @SerialName("component_template_id") val componentTemplateId: String? = null,
+    val title: String? = null,
     val schema: JsonObject? = null,
+    val response: JsonObject? = null,
     val status: String, // pending, submitted, expired
+    @SerialName("requested_by") val requestedBy: String? = null,
+    @SerialName("responded_by") val respondedBy: String? = null,
     @SerialName("expires_at") val expiresAt: String? = null,
-    @SerialName("created_at") val createdAt: String
-)
+    @SerialName("created_at") val createdAt: String,
+    @SerialName("submitted_at") val submittedAt: String? = null,
+    @SerialName("reviewed_at") val reviewedAt: String? = null
+) {
+    val prompt: String get() = title ?: ""
+    val type: String get() = schema?.get("type")?.jsonPrimitive?.content ?: componentTemplateId ?: "text"
+    val orderId: String get() = "" // Deprecated, but kept for compatibility
+}
 
 @Serializable
 data class FormResponseDto(

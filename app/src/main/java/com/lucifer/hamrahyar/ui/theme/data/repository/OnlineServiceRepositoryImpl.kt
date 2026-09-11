@@ -17,6 +17,8 @@ import io.github.jan.supabase.auth.auth
 import io.github.jan.supabase.postgrest.postgrest
 import io.github.jan.supabase.postgrest.from
 import io.github.jan.supabase.postgrest.query.Order
+import io.github.jan.supabase.postgrest.query.filter.FilterOperation
+import io.github.jan.supabase.postgrest.query.filter.FilterOperator
 import io.github.jan.supabase.postgrest.rpc
 import io.github.jan.supabase.realtime.*
 import io.github.jan.supabase.exceptions.RestException
@@ -25,6 +27,7 @@ import io.ktor.client.request.post
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.*
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.channels.awaitClose
@@ -57,7 +60,18 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
         try {
             val session = client.auth.currentSessionOrNull()
             if (session == null || (session.expiresAt != null && session.expiresAt!! < kotlinx.datetime.Clock.System.now())) {
-                Log.d(TAG, "No valid session found, signing in anonymously...")
+                Log.d(TAG, "No valid session found or expired, attempting refresh...")
+                try {
+                    client.auth.refreshCurrentSession()
+                    if (client.auth.currentSessionOrNull() != null) {
+                        Log.d(TAG, "Session refreshed successfully")
+                        return@withContext true
+                    }
+                } catch (e: Exception) {
+                    Log.d(TAG, "Session refresh failed: ${e.message}")
+                }
+                
+                Log.d(TAG, "Signing in anonymously...")
                 client.auth.signInAnonymously()
                 val newSession = client.auth.currentSessionOrNull()
                 Log.d(TAG, "New session created: ${newSession?.accessToken?.take(10)}...")
@@ -307,7 +321,10 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
         ensureAuthSession()
         var currentList = emptyList<ChatMessage>()
         val channel = client.realtime.channel("chat_$conversationId")
-        val changeFlow = channel.postgresChangeFlow<PostgresAction>(schema = "public") { table = "messages" }
+        val changeFlow = channel.postgresChangeFlow<PostgresAction>(schema = "public") { 
+            table = "messages" 
+            filter(FilterOperation("conversation_id", FilterOperator.EQ, conversationId))
+        }
         
         val job = launch {
             try {
@@ -316,8 +333,11 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
                     order("created_at", Order.ASCENDING)
                 }.decodeAs<List<MessageDto>>()
                 currentList = messages.map { it.toDomain(profileId) }
+                Log.d(TAG, "Loaded ${currentList.size} messages for conversation=$conversationId")
                 trySend(currentList)
-            } catch (e: Exception) { }
+            } catch (e: Exception) { 
+                Log.e(TAG, "Error fetching messages for conversation=$conversationId: ${e.message}", e)
+            }
 
             changeFlow.collect { action ->
                 try {
@@ -332,9 +352,19 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
                                 }
                             }
                         }
+                        is PostgresAction.Update -> {
+                            val updatedMsgDto = json.decodeFromJsonElement<MessageDto>(action.record)
+                            if (updatedMsgDto.conversationId == conversationId) {
+                                val updatedMsg = updatedMsgDto.toDomain(profileId)
+                                currentList = currentList.map { if (it.id == updatedMsg.id) updatedMsg else it }
+                                trySend(currentList)
+                            }
+                        }
                         else -> {}
                     }
-                } catch (e: Exception) { }
+                } catch (e: Exception) { 
+                    Log.e(TAG, "Error processing realtime message for conversation=$conversationId: ${e.message}", e)
+                }
             }
         }
         
@@ -342,7 +372,11 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
         awaitClose { 
             job.cancel()
             runBlocking {
-                channel.unsubscribe()
+                try {
+                    channel.unsubscribe()
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error unsubscribing from chat channel: ${e.message}")
+                }
             }
         }
     }
@@ -430,86 +464,79 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
 
     override fun observeFormRequests(orderId: String): Flow<List<FormRequestDto>> = callbackFlow {
         ensureAuthSession()
-        val channel = client.realtime.channel("forms_$orderId")
-        val formsFlow = channel.postgresChangeFlow<PostgresAction>(schema = "public") {
-            table = "form_requests"
-        }
-
-        val fetchForms = suspend {
-            try {
-                val forms = client.from("form_requests").select {
-                    filter { eq("order_id", orderId) }
-                    order("created_at", Order.ASCENDING)
-                }.decodeAs<List<FormRequestDto>>()
-                trySend(forms)
-            } catch (e: Exception) {
-                Log.e(TAG, "Error fetching forms: ${e.message}")
-            }
-        }
-
+        
+        var activeChannel: RealtimeChannel? = null
+        
         val job = launch {
-            formsFlow.collect { action ->
-                val record = when (action) {
-                    is PostgresAction.Insert -> action.record
-                    is PostgresAction.Update -> action.record
-                    else -> null
-                }
-                if (record != null) {
-                    val fOrderId = record["order_id"]?.jsonPrimitive?.content
-                    if (fOrderId == orderId) fetchForms()
-                } else if (action is PostgresAction.Delete) {
-                    fetchForms()
+            val conversationId = getConversationForOrder(orderId).getOrNull()
+            if (conversationId == null) {
+                Log.w(TAG, "observeFormRequests: No conversation found for order $orderId")
+                trySend(emptyList())
+                close()
+                return@launch
+            }
+
+            val channel = client.realtime.channel("forms_$conversationId")
+            activeChannel = channel
+            
+            val formsFlow = channel.postgresChangeFlow<PostgresAction>(schema = "public") {
+                table = "form_requests"
+                filter(FilterOperation("conversation_id", FilterOperator.EQ, conversationId))
+            }
+
+            val fetchForms = suspend {
+                try {
+                    val forms = client.from("form_requests").select {
+                        filter { eq("conversation_id", conversationId) }
+                        order("created_at", Order.ASCENDING)
+                    }.decodeAs<List<FormRequestDto>>()
+                    trySend(forms)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error fetching forms for conversation $conversationId: ${e.message}")
                 }
             }
+
+            launch {
+                formsFlow.collect { action ->
+                    val record = when (action) {
+                        is PostgresAction.Insert -> action.record
+                        is PostgresAction.Update -> action.record
+                        else -> null
+                    }
+                    if (record != null) {
+                        val fConvId = record["conversation_id"]?.jsonPrimitive?.content
+                        if (fConvId == conversationId) fetchForms()
+                    } else if (action is PostgresAction.Delete) {
+                        fetchForms()
+                    }
+                }
+            }
+
+            channel.subscribe()
+            fetchForms()
         }
-
-        channel.subscribe()
-        fetchForms()
-
-        awaitClose {
+        
+        awaitClose { 
             job.cancel()
-            runBlocking { channel.unsubscribe() }
+            runBlocking {
+                try {
+                    activeChannel?.unsubscribe()
+                } catch (e: Exception) { }
+            }
         }
     }
 
-    override fun observeFormResponses(orderId: String): Flow<List<FormResponseDto>> = callbackFlow {
-        ensureAuthSession()
-        val channel = client.realtime.channel("responses_$orderId")
-        val responsesFlow = channel.postgresChangeFlow<PostgresAction>(schema = "public") {
-            table = "form_responses"
-        }
-
-        val fetchResponses = suspend {
-            try {
-                val responses = client.from("form_responses").select {
-                    filter { eq("order_id", orderId) }
-                }.decodeAs<List<FormResponseDto>>()
-                trySend(responses)
-            } catch (e: Exception) { }
-        }
-
-        val job = launch {
-            responsesFlow.collect { action ->
-                val record = when (action) {
-                    is PostgresAction.Insert -> action.record
-                    is PostgresAction.Update -> action.record
-                    else -> null
-                }
-                if (record != null) {
-                    val rOrderId = record["order_id"]?.jsonPrimitive?.content
-                    if (rOrderId == orderId) fetchResponses()
-                } else if (action is PostgresAction.Delete) {
-                    fetchResponses()
-                }
+    override fun observeFormResponses(orderId: String): Flow<List<FormResponseDto>> = observeFormRequests(orderId).map { requests ->
+        requests.mapNotNull { req ->
+            req.response?.let {
+                FormResponseDto(
+                    id = null,
+                    requestId = req.id,
+                    orderId = orderId,
+                    data = it,
+                    createdAt = req.submittedAt ?: req.createdAt
+                )
             }
-        }
-
-        channel.subscribe()
-        fetchResponses()
-
-        awaitClose {
-            job.cancel()
-            runBlocking { channel.unsubscribe() }
         }
     }
 
