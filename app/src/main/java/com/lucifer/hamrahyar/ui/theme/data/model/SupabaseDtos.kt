@@ -3,6 +3,8 @@ package com.lucifer.hamrahyar.ui.theme.data.model
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonPrimitive
 
 @Serializable
@@ -328,6 +330,29 @@ data class AdminUserPresenceDto(
 )
 
 @Serializable
+data class FormCondition(
+    val field: String,
+    val equals: JsonElement
+)
+
+@Serializable
+data class FormField(
+    val key: String,
+    val label: String,
+    val type: String,
+    val required: Boolean = false,
+    val options: List<String>? = null,
+    @SerialName("options_source") val optionsSource: String? = null,
+    @SerialName("max_length") val maxLength: Int? = null,
+    @SerialName("visible_when") val visibleWhen: FormCondition? = null,
+    @SerialName("required_when") val requiredWhen: FormCondition? = null,
+    val secret: Boolean = false,
+    val placeholder: String? = null,
+    @SerialName("max_size_mb") val maxSizeMb: Int? = null,
+    val description: String? = null
+)
+
+@Serializable
 data class FormRequestDto(
     val id: String,
     @SerialName("conversation_id") val conversationId: String,
@@ -345,7 +370,10 @@ data class FormRequestDto(
     @SerialName("reviewed_at") val reviewedAt: String? = null
 ) {
     val prompt: String get() = title ?: ""
-    val type: String get() = schema?.get("type")?.jsonPrimitive?.content ?: componentTemplateId ?: "text"
+    val type: String get() {
+        val typeElement = schema?.get("type")
+        return if (typeElement is JsonPrimitive) typeElement.content else componentTemplateId ?: "text"
+    }
     val orderId: String get() = "" // Deprecated, but kept for compatibility
 }
 

@@ -21,6 +21,7 @@ import io.github.jan.supabase.postgrest.query.filter.FilterOperation
 import io.github.jan.supabase.postgrest.query.filter.FilterOperator
 import io.github.jan.supabase.postgrest.rpc
 import io.github.jan.supabase.realtime.*
+import io.github.jan.supabase.storage.storage
 import io.github.jan.supabase.exceptions.RestException
 import io.ktor.client.request.header
 import io.ktor.client.request.post
@@ -573,8 +574,31 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
 
             launch {
                 formsFlow.collect { action ->
-                    Log.d(TAG, "Form Realtime event: ${action::class.simpleName} for $conversationId")
-                    fetchForms()
+                    try {
+                        when (action) {
+                            is PostgresAction.Insert -> {
+                                val newForm = json.decodeFromJsonElement<FormRequestDto>(action.record)
+                                if (!currentForms.any { it.id == newForm.id }) {
+                                    currentForms = (currentForms + newForm).sortedBy { it.createdAt }
+                                    trySend(currentForms)
+                                }
+                            }
+                            is PostgresAction.Update -> {
+                                val updatedForm = json.decodeFromJsonElement<FormRequestDto>(action.record)
+                                currentForms = currentForms.map { if (it.id == updatedForm.id) updatedForm else it }
+                                trySend(currentForms)
+                            }
+                            is PostgresAction.Delete -> {
+                                val deletedId = action.oldRecord["id"]?.jsonPrimitive?.content
+                                currentForms = currentForms.filter { it.id != deletedId }
+                                trySend(currentForms)
+                            }
+                            else -> {}
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error merging form event: ${e.message}")
+                        fetchForms() // Fallback to full fetch on error
+                    }
                 }
             }
 
@@ -594,15 +618,16 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
 
     override fun observeFormResponses(conversationId: String): Flow<List<FormResponseDto>> = observeFormRequests(conversationId).map { requests ->
         requests.mapNotNull { req ->
-            req.response?.let {
+            val resp = req.response
+            if (resp is JsonObject) {
                 FormResponseDto(
                     id = null,
                     requestId = req.id,
                     orderId = "", // Deprecated
-                    data = it,
+                    data = resp,
                     createdAt = req.submittedAt ?: req.createdAt
                 )
-            }
+            } else null
         }
     }
 
@@ -616,6 +641,46 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
             })
             Result.success(Unit)
         } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun uploadFile(bucket: String, path: String, data: ByteArray, mimeType: String): Result<String> {
+        return try {
+            ensureAuthSession()
+            val bucketApi = client.storage.from(bucket)
+            bucketApi.upload(path, data) {
+                upsert = true
+            }
+            Result.success(path)
+        } catch (e: Exception) {
+            Log.e(TAG, "File upload failed: ${e.message}")
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun registerFormFile(
+        formRequestId: String,
+        originalName: String,
+        storagePath: String,
+        mimeType: String,
+        fileSize: Long
+    ): Result<String> {
+        return try {
+            ensureAuthSession()
+            val response = client.postgrest.rpc("register_form_file", buildJsonObject {
+                put("p_form_request_id", formRequestId)
+                put("p_original_name", originalName)
+                put("p_storage_path", storagePath)
+                put("p_mime_type", mimeType)
+                put("p_file_size", fileSize)
+            })
+            
+            // Assuming the RPC returns the file ID as a string or in a JsonPrimitive
+            val fileId = response.decodeAs<String>()
+            Result.success(fileId)
+        } catch (e: Exception) {
+            Log.e(TAG, "Register form file failed: ${e.message}")
             Result.failure(e)
         }
     }

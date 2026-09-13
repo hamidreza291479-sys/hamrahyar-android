@@ -55,6 +55,16 @@ interface OnlineServiceRepository {
     
     suspend fun submitFormResponse(requestId: String, orderId: String, data: String): Result<Unit>
 
+    suspend fun uploadFile(bucket: String, path: String, data: ByteArray, mimeType: String): Result<String>
+
+    suspend fun registerFormFile(
+        formRequestId: String,
+        originalName: String,
+        storagePath: String,
+        mimeType: String,
+        fileSize: Long
+    ): Result<String>
+
     suspend fun cancelService(orderId: String): Result<Unit>
     
     suspend fun getLatestOrderEvent(guestKey: String): Result<LatestOrderEvent?>

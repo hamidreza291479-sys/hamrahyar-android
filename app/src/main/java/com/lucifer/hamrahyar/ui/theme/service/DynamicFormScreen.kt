@@ -31,29 +31,9 @@ import com.lucifer.hamrahyar.ui.theme.Vazir
 import com.lucifer.hamrahyar.ui.theme.domain.repository.OnlineServiceRepository
 import com.lucifer.hamrahyar.ui.theme.utils.ProvinceCityData
 import com.lucifer.hamrahyar.ui.home.components.PlateInput
-import kotlinx.serialization.SerialName
-import kotlinx.serialization.Serializable
+import com.lucifer.hamrahyar.ui.theme.data.model.FormField
+import com.lucifer.hamrahyar.ui.theme.data.model.FormCondition
 import kotlinx.serialization.json.*
-
-@Serializable
-data class FormCondition(
-    val field: String,
-    val equals: JsonElement
-)
-
-@Serializable
-data class FormField(
-    val key: String,
-    val label: String,
-    val type: String,
-    val required: Boolean = false,
-    val options: List<String>? = null,
-    @SerialName("options_source") val optionsSource: String? = null,
-    @SerialName("max_length") val maxLength: Int? = null,
-    @SerialName("visible_when") val visibleWhen: FormCondition? = null,
-    @SerialName("required_when") val requiredWhen: FormCondition? = null,
-    val secret: Boolean = false
-)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -92,7 +72,12 @@ fun DynamicFormScreen(
     }
 
     val fields = remember(schemaObj) {
-        schemaObj?.get("fields")?.jsonArray?.map { json.decodeFromJsonElement<FormField>(it) } ?: emptyList()
+        val fieldsElement = schemaObj?.get("fields")
+        if (fieldsElement is JsonArray) {
+            fieldsElement.mapNotNull { 
+                try { json.decodeFromJsonElement<FormField>(it) } catch(e: Exception) { null }
+            }
+        } else emptyList()
     }
     
     // If we have errors, we shouldn't be in review mode

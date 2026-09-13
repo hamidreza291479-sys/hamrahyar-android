@@ -9,13 +9,10 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Cancel
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -60,15 +57,12 @@ fun ChatScreen(
 ) {
     val context = LocalContext.current
     var messages by remember { mutableStateOf<List<ChatMessage>>(emptyList()) }
-    var inputText by remember { mutableStateOf("") }
     var realtimeStatus by remember { mutableStateOf("CONNECTED") }
     var showCancelDialog by remember { mutableStateOf(false) }
     var showOrderDetails by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     var formRequests by remember { mutableStateOf<List<FormRequestDto>>(emptyList()) }
     var formResponses by remember { mutableStateOf<List<FormResponseDto>>(emptyList()) }
-    
-    val listState = rememberLazyListState()
     
     LaunchedEffect(Unit) {
         repository.observeRealtimeStatus().collectLatest { realtimeStatus = it }
@@ -99,19 +93,10 @@ fun ChatScreen(
         modifier = Modifier
             .fillMaxSize()
             .drawBehind {
-                // Premium Calm Chat Background
                 drawRect(
                     brush = Brush.verticalGradient(
                         colors = listOf(Color(0xFF0F0C29), Color(0xFF1B1B2F), Color(0xFF16213E))
                     )
-                )
-                // Subtle patterns
-                drawCircle(
-                    brush = Brush.radialGradient(
-                        colors = listOf(Color(0xFF6C5CE7).copy(alpha = 0.05f), Color.Transparent)
-                    ),
-                    center = Offset(size.width * 0.8f, size.height * 0.2f),
-                    radius = 500f
                 )
             }
     ) {
@@ -125,30 +110,11 @@ fun ChatScreen(
                             titleContentColor = Color.White
                         ),
                         title = {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { showOrderDetails = !showOrderDetails }
-                            ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        request.serviceName ?: "خدمت",
-                                        fontFamily = Lalezar,
-                                        fontSize = 18.sp,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    StatusBadge(status = request.status)
-                                }
-                                
-                                Icon(
-                                    if (showOrderDetails) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
-                                    null,
-                                    tint = Color.White.copy(alpha = 0.5f),
-                                    modifier = Modifier.padding(end = 8.dp)
-                                )
-                            }
+                            Text(
+                                "جزئیات درخواست",
+                                fontFamily = Lalezar,
+                                fontSize = 18.sp
+                            )
                         },
                         navigationIcon = {
                             IconButton(onClick = onBack) {
@@ -164,7 +130,6 @@ fun ChatScreen(
                         }
                     )
                     
-                    // Connection Status Indicator (Independent from Order Status)
                     AnimatedVisibility(
                         visible = realtimeStatus != "CONNECTED",
                         enter = fadeIn(),
@@ -186,34 +151,6 @@ fun ChatScreen(
                         }
                     }
                 }
-            },
-            bottomBar = {
-                ChatBottomBar(
-                    isClosed = isClosed,
-                    isSubmitted = isSubmitted,
-                    conversationId = conversationId,
-                    inputText = inputText,
-                    onInputChange = { inputText = it },
-                    status = request.status,
-                    result = request.result,
-                    onIUnderstood = {
-                        scope.launch {
-                            repository.clearLocalAccess()
-                            onActiveRequestUpdate(null)
-                            onBack()
-                        }
-                    },
-                    onSend = {
-                        if (inputText.isNotBlank() && conversationId.isNotEmpty() && request.profileId != null) {
-                            scope.launch {
-                                repository.sendMessage(conversationId, inputText, request.profileId)
-                                inputText = ""
-                            }
-                        } else if (request.profileId == null) {
-                            Toast.makeText(context, "در حال اتصال به گفتگو...", Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                )
             }
         ) { padding ->
             if (showCancelDialog) {
@@ -237,44 +174,131 @@ fun ChatScreen(
                 )
             }
 
-            Column(
+            LazyColumn(
                 modifier = Modifier
                     .padding(padding)
-                    .fillMaxSize()
+                    .fillMaxSize(),
+                contentPadding = PaddingValues(16.dp)
             ) {
-                // Order Details Summary Card
-                AnimatedVisibility(visible = showOrderDetails) {
+                item {
                     OrderDetailsSummaryCard(request = request)
+                    Spacer(modifier = Modifier.height(24.dp))
+                    Text(
+                        "فرم‌های مورد نیاز",
+                        fontFamily = Lalezar,
+                        fontSize = 18.sp,
+                        color = Color.White,
+                        modifier = Modifier.padding(bottom = 12.dp)
+                    )
                 }
-
-                LazyColumn(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth(),
-                    reverseLayout = true,
-                    state = listState,
-                    contentPadding = PaddingValues(16.dp)
-                ) {
-                    items(messages.reversed(), key = { it.id }) { message ->
-                        if (message.type == "form") {
-                            val form = formRequests.find { it.messageId == message.id }
-                            val response = formResponses.find { it.requestId == form?.id }
-                            if (form != null) {
-                                FormRequestCard(form, response) { data ->
-                                    scope.launch {
-                                        repository.submitFormResponse(form.id, request.id, data)
-                                    }
-                                }
+                
+                if (formRequests.isEmpty()) {
+                    item {
+                        Box(
+                            modifier = Modifier.fillMaxWidth().padding(32.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (isSubmitted) {
+                                Text(
+                                    "کارشناسان فرم‌های مربوط را برای شما ارسال می‌کنند.",
+                                    color = Color.White.copy(alpha = 0.5f),
+                                    fontFamily = Vazir,
+                                    fontSize = 14.sp,
+                                    textAlign = TextAlign.Center
+                                )
                             } else {
-                                // Fallback if form not loaded yet
-                                Text("در حال بارگذاری فرم...", color = Color.Gray, fontSize = 12.sp, modifier = Modifier.padding(8.dp))
+                                CircularProgressIndicator(color = Color(0xFFa29bfe))
                             }
-                        } else {
-                            MessageBubble(message)
                         }
                     }
                 }
+
+                items(formRequests, key = { "form_${it.id}" }) { form ->
+                    val response = formResponses.find { it.requestId == form.id }
+                    FormRequestCard(
+                        request = form, 
+                        response = response,
+                        repository = repository,
+                        orderId = request.id,
+                        onSubmit = { data ->
+                            scope.launch {
+                                repository.submitFormResponse(form.id, request.id, data)
+                                    .onSuccess {
+                                        Toast.makeText(context, "فرم با موفقیت ارسال شد", Toast.LENGTH_SHORT).show()
+                                    }
+                                    .onFailure {
+                                        Toast.makeText(context, "خطا در ارسال فرم", Toast.LENGTH_SHORT).show()
+                                    }
+                            }
+                        }
+                    )
+                }
+                
+                val notices = messages.filter { it.senderRole == "ADMIN" && it.type == "text" }
+                if (notices.isNotEmpty()) {
+                    item {
+                        Spacer(modifier = Modifier.height(24.dp))
+                        Text(
+                            "اطلاعیه‌های کارشناس",
+                            fontFamily = Lalezar,
+                            fontSize = 18.sp,
+                            color = Color.White,
+                            modifier = Modifier.padding(bottom = 12.dp)
+                        )
+                    }
+                    
+                    items(notices, key = { "msg_${it.id}" }) { notice ->
+                        NoticeCard(notice)
+                    }
+                }
+                
+                item {
+                    Spacer(modifier = Modifier.height(80.dp))
+                }
             }
+            
+            if (request.status == ServiceStatus.REJECTED && request.result == "expired_without_acceptance") {
+                Box(
+                    modifier = Modifier.fillMaxSize().padding(16.dp),
+                    contentAlignment = Alignment.BottomCenter
+                ) {
+                    Button(
+                        onClick = {
+                            scope.launch {
+                                repository.clearLocalAccess()
+                                onActiveRequestUpdate(null)
+                                onBack()
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6C5CE7)),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth().height(48.dp)
+                    ) {
+                        Text("فهمیدم", fontFamily = Lalezar, fontSize = 16.sp)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun NoticeCard(message: ChatMessage) {
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.05f)),
+        shape = RoundedCornerShape(16.dp),
+        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.1f))
+    ) {
+        Row(modifier = Modifier.padding(16.dp)) {
+            Icon(Icons.Default.Info, null, tint = Color(0xFFFDCB6E), modifier = Modifier.size(20.dp))
+            Spacer(modifier = Modifier.width(12.dp))
+            Text(
+                text = message.content,
+                color = Color.White,
+                fontFamily = Vazir,
+                fontSize = 14.sp
+            )
         }
     }
 }
@@ -325,7 +349,7 @@ fun OrderDetailsSummaryCard(request: ServiceRequest) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(16.dp),
+            .padding(vertical = 8.dp),
         colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.08f)),
         shape = RoundedCornerShape(20.dp),
         border = BorderStroke(1.dp, Color.White.copy(alpha = 0.1f))
@@ -351,7 +375,6 @@ fun OrderDetailsSummaryCard(request: ServiceRequest) {
                 
                 SummaryRow("اولویت", request.priority.label)
 
-                // Show Invoice if issued
                 if (request.status == ServiceStatus.INVOICE_ISSUED || request.status == ServiceStatus.WAITING_PAYMENT || request.status == ServiceStatus.PAID || request.status == ServiceStatus.PROCESSING || request.status == ServiceStatus.READY_DELIVERY || request.status == ServiceStatus.CLOSED) {
                     if (request.totalAmount > 0) {
                         HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp), color = Color.White.copy(alpha = 0.1f))
@@ -368,7 +391,6 @@ fun OrderDetailsSummaryCard(request: ServiceRequest) {
                     }
                 }
 
-                // Show Admin Info if order is accepted
                 if (request.status != ServiceStatus.SUBMITTED && request.adminName != null) {
                     HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp), color = Color.White.copy(alpha = 0.05f))
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -413,173 +435,6 @@ fun SummaryRow(label: String, value: String, isHighlighted: Boolean = false) {
             fontSize = if (isHighlighted) 14.sp else 12.sp, 
             fontWeight = FontWeight.Bold
         )
-    }
-}
-
-@Composable
-fun ChatBottomBar(
-    isClosed: Boolean,
-    isSubmitted: Boolean,
-    conversationId: String,
-    inputText: String,
-    onInputChange: (String) -> Unit,
-    onSend: () -> Unit,
-    status: ServiceStatus,
-    result: String?,
-    onIUnderstood: () -> Unit
-) {
-    Surface(
-        color = Color(0xFF1B1B2F),
-        tonalElevation = 8.dp,
-        modifier = Modifier.imePadding()
-    ) {
-        if (status == ServiceStatus.REJECTED && result == "expired_without_acceptance") {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Button(
-                    onClick = onIUnderstood,
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6C5CE7)),
-                    shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier.fillMaxWidth().height(48.dp)
-                ) {
-                    Text("فهمیدم", fontFamily = Lalezar, fontSize = 16.sp)
-                }
-            }
-        } else if (!isClosed && !isSubmitted && conversationId.isNotEmpty()) {
-            Row(
-                modifier = Modifier
-                    .padding(horizontal = 16.dp, vertical = 10.dp)
-                    .fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(onClick = { /* File picker */ }) {
-                    Icon(Icons.Default.AttachFile, null, tint = Color.White.copy(alpha = 0.6f))
-                }
-                
-                OutlinedTextField(
-                    value = inputText,
-                    onValueChange = onInputChange,
-                    modifier = Modifier.weight(1f),
-                    placeholder = { Text("اینجا بنویسید...", fontFamily = Vazir, fontSize = 14.sp, color = Color.White.copy(alpha = 0.3f)) },
-                    shape = RoundedCornerShape(24.dp),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = Color(0xFFa29bfe),
-                        unfocusedBorderColor = Color.White.copy(alpha = 0.1f),
-                        focusedTextColor = Color.White,
-                        unfocusedTextColor = Color.White,
-                        cursorColor = Color.White
-                    ),
-                    maxLines = 4
-                )
-                
-                Spacer(modifier = Modifier.width(8.dp))
-                
-                FloatingActionButton(
-                    onClick = onSend,
-                    containerColor = Color(0xFF6C5CE7),
-                    modifier = Modifier.size(48.dp),
-                    shape = CircleShape,
-                    elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 0.dp)
-                ) {
-                    Icon(Icons.AutoMirrored.Filled.Send, null, tint = Color.White)
-                }
-            }
-        } else {
-            val footerText = when {
-                isClosed -> "این گفتگو بسته شده است."
-                isSubmitted -> "درخواست شما ثبت شده و بزودی گفتگو با کارشناس آغاز می‌شود."
-                conversationId.isNotEmpty() -> "کارشناسان فرم های مربوط را برای شما ارسال می کنند."
-                else -> "در حال آماده‌سازی گفتگو..."
-            }
-            
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(20.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = footerText,
-                    fontFamily = Vazir,
-                    fontSize = 13.sp,
-                    color = Color.White.copy(alpha = 0.5f),
-                    textAlign = TextAlign.Center
-                )
-            }
-        }
-    }
-}
-
-@Composable
-fun MessageBubble(message: ChatMessage) {
-    val isCustomer = message.senderRole == "CUSTOMER"
-    val isSystem = message.senderRole == "SYSTEM"
-    
-    if (isSystem) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 12.dp, horizontal = 24.dp),
-            contentAlignment = Alignment.Center
-        ) {
-            Surface(
-                color = Color.White.copy(alpha = 0.05f),
-                shape = RoundedCornerShape(12.dp),
-                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.1f))
-            ) {
-                Text(
-                    text = message.content,
-                    color = Color.White.copy(alpha = 0.8f),
-                    fontFamily = Vazir,
-                    fontSize = 12.sp,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.padding(12.dp)
-                )
-            }
-        }
-        return
-    }
-
-    val color = if (isCustomer) Color(0xFF6C5CE7) else Color.White.copy(alpha = 0.08f)
-    val textColor = Color.White
-    
-    val time = SimpleDateFormat("HH:mm", Locale.forLanguageTag("fa")).format(Date(message.timestamp))
-        .replace("0", "۰").replace("1", "۱").replace("2", "۲").replace("3", "۳").replace("4", "۴").replace("5", "۵").replace("6", "۶").replace("7", "۷").replace("8", "۸").replace("9", "۹")
-
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp),
-        horizontalArrangement = if (isCustomer) Arrangement.End else Arrangement.Start
-    ) {
-        Column(
-            modifier = Modifier
-                .widthIn(max = 300.dp)
-                .clip(
-                    RoundedCornerShape(
-                        topStart = 18.dp,
-                        topEnd = 18.dp,
-                        bottomStart = if (isCustomer) 18.dp else 4.dp,
-                        bottomEnd = if (isCustomer) 4.dp else 18.dp
-                    )
-                )
-                .background(color)
-                .padding(12.dp)
-        ) {
-            Text(text = message.content, color = textColor, fontFamily = Vazir, fontSize = 14.sp)
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = time,
-                color = textColor.copy(alpha = 0.4f),
-                fontFamily = Vazir,
-                fontSize = 9.sp,
-                modifier = Modifier.align(Alignment.End)
-            )
-        }
     }
 }
 
