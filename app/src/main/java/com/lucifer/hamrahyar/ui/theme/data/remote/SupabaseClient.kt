@@ -28,10 +28,17 @@ object SupabaseClient {
     val client: SupabaseClient
         get() = _client ?: throw IllegalStateException("SupabaseClient not initialized. Call init(context) first.")
 
+    private var _sessionManager: PreferenceSessionManager? = null
+    val sessionManager: PreferenceSessionManager
+        get() = _sessionManager ?: throw IllegalStateException("SupabaseClient not initialized.")
+
     fun init(context: Context) {
         if (_client != null) return
         
         Log.d(TAG, "Initializing SupabaseClient...")
+        val manager = PreferenceSessionManager(context.applicationContext)
+        _sessionManager = manager
+        
         _client = createSupabaseClient(
             supabaseUrl = BuildConfig.SUPABASE_URL,
             supabaseKey = BuildConfig.SUPABASE_ANON_KEY
@@ -46,7 +53,7 @@ object SupabaseClient {
             
             install(Postgrest)
             install(Auth) {
-                sessionManager = PreferenceSessionManager(context.applicationContext)
+                sessionManager = manager
             }
             install(Realtime)
             install(Storage)
@@ -67,11 +74,24 @@ class PreferenceSessionManager(context: Context) : SessionManager {
         isLenient = true
     }
 
+    /**
+     * Marker to indicate if this installation has ever had a successful Auth session.
+     * This prevents recreation of anonymous users if the session is lost.
+     */
+    var hasInitializedAuth: Boolean
+        get() = prefs.getBoolean("has_initialized_auth", false)
+        private set(value) = prefs.edit().putBoolean("has_initialized_auth", value).apply()
+
     override suspend fun saveSession(session: UserSession) {
         try {
             val sessionStr = json.encodeToString(session)
             prefs.edit().putString("session", sessionStr).apply()
-            Log.d(TAG, "Session saved successfully for user: ${session.user?.id}")
+            
+            // Mark as initialized once we have a valid session
+            if (session.accessToken.isNotBlank()) {
+                hasInitializedAuth = true
+                Log.d(TAG, "Session saved. Marker set: hasInitializedAuth=true")
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to save session", e)
         }
@@ -85,7 +105,7 @@ class PreferenceSessionManager(context: Context) : SessionManager {
         }
         return try {
             val session = json.decodeFromString<UserSession>(sessionStr)
-            Log.d(TAG, "Session loaded successfully for user: ${session.user?.id}")
+            Log.d(TAG, "Session loaded successfully")
             session
         } catch (e: Exception) {
             Log.e(TAG, "Failed to load session from storage", e)
@@ -96,5 +116,7 @@ class PreferenceSessionManager(context: Context) : SessionManager {
     override suspend fun deleteSession() {
         Log.d(TAG, "Deleting session from storage")
         prefs.edit().remove("session").apply()
+        // Note: We DO NOT reset hasInitializedAuth here, as we want to know 
+        // that this device DID have an identity before.
     }
 }

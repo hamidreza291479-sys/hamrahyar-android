@@ -77,7 +77,7 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
                         Log.d(TAG, "Auth: Session expired, attempting refresh...")
                         try {
                             client.auth.refreshCurrentSession()
-                            Log.d(TAG, "Auth: Session refreshed successfully. User: ${client.auth.currentUserOrNull()?.id}")
+                            Log.d(TAG, "Auth: Session refreshed successfully.")
                             return@withLock true
                         } catch (e: Exception) {
                             Log.e(TAG, "Auth: Session refresh failed: ${e.message}")
@@ -89,11 +89,16 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
                     return@withLock true // Session is valid
                 }
                 
-                // 2. No session at all (First time or cleared storage)
-                Log.d(TAG, "Auth: No session found. Creating new anonymous user...")
+                // 2. No session found
+                val identityExisted = SupabaseClient.sessionManager.hasInitializedAuth
+                if (identityExisted) {
+                    Log.w(TAG, "Auth: Session lost but identity previously existed. Preventing new user recreation.")
+                    return@withLock false
+                }
+
+                Log.d(TAG, "Auth: First-time setup. Creating new anonymous user...")
                 client.auth.signInAnonymously()
                 val newSession = client.auth.currentSessionOrNull()
-                Log.d(TAG, "Auth: Anonymous user created: ${client.auth.currentUserOrNull()?.id}")
                 return@withLock newSession != null
                 
             } catch (e: Exception) {
@@ -260,7 +265,8 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
 
     override suspend fun getMyActiveOrder(guestKey: String): Result<ActiveService?> {
         return try {
-            ensureAuthSession()
+            if (!ensureAuthSession()) return Result.failure(Exception("AUTH_FAILED"))
+            
             val response = client.postgrest.rpc("get_my_active_order_summary", buildJsonObject {
                 put("p_customer_key", JsonPrimitive(guestKey))
             })
@@ -345,7 +351,11 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
     override suspend fun bindOrderAccess(accessToken: String): Result<BindOrderResult> = Result.failure(Exception("DEPRECATED"))
 
     override fun getMessages(conversationId: String, profileId: String): Flow<List<ChatMessage>> = callbackFlow {
-        ensureAuthSession()
+        if (!ensureAuthSession()) {
+            trySend(emptyList())
+            close()
+            return@callbackFlow
+        }
         var currentList = emptyList<ChatMessage>()
         Log.d(TAG, "OrderRepository: subscribing to messages conversation=$conversationId")
         
@@ -428,7 +438,7 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
     }
 
     override suspend fun sendMessage(conversationId: String, body: String, senderId: String): Result<ChatMessage> {
-        ensureAuthSession()
+        if (!ensureAuthSession()) return Result.failure(Exception("AUTH_FAILED"))
         return try {
             val msgDto = MessageDto(conversationId = conversationId, senderId = senderId, body = body)
             val inserted = client.from("messages").insert(msgDto).decodeSingle<MessageDto>()
@@ -439,7 +449,10 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
     override fun observeOrderDeletions(): Flow<String> = emptyFlow()
     
     override fun observeOrderUpdates(): Flow<ActiveService> = callbackFlow {
-        ensureAuthSession()
+        if (!ensureAuthSession()) {
+            close()
+            return@callbackFlow
+        }
         val guestKey = getOrCreateGuestKey()
         
         Log.d(TAG, "OrderRepository: starting observeOrderUpdates for guest=$guestKey")
@@ -550,7 +563,11 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
     override fun observeRealtimeStatus(): Flow<String> = client.realtime.status.map { it.name }
 
     override fun observeFormRequests(conversationId: String): Flow<List<FormRequestDto>> = callbackFlow {
-        ensureAuthSession()
+        if (!ensureAuthSession()) {
+            trySend(emptyList())
+            close()
+            return@callbackFlow
+        }
         
         var currentForms = emptyList<FormRequestDto>()
         var activeChannel: RealtimeChannel? = null
@@ -651,34 +668,30 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
     override suspend fun submitFormResponse(requestId: String, orderId: String, data: String): Result<Unit> {
         return try {
             if (!ensureAuthSession()) {
-                return Result.failure(Exception("خطا در احراز هویت. نشست کاربری معتبر یافت نشد."))
+                return Result.failure(Exception("خطا در احراز هویت. نشست کاربری قبلی بازیابی نشد. لطفاً اپلیکیشن را کاملاً بسته و دوباره باز کنید."))
             }
             
             val session = client.auth.currentSessionOrNull()
-            val user = client.auth.currentUserOrNull()
+            if (session == null) {
+                return Result.failure(Exception("خطا: نشست معتبری یافت نشد."))
+            }
+
             val responseJson = Json.parseToJsonElement(data).jsonObject
             
-            // Log non-sensitive debug info (REQUIRED for tracing root cause)
-            Log.d(TAG, "submitFormResponse START")
-            Log.d(TAG, "  - Form ID (p_form_id): $requestId")
-            Log.d(TAG, "  - Order ID: $orderId")
-            Log.d(TAG, "  - User ID: ${user?.id}")
-            Log.d(TAG, "  - Is Anonymous: ${user?.identities.isNullOrEmpty()}")
-            Log.d(TAG, "  - Session exists: ${session != null}")
-            Log.d(TAG, "  - Session Expired: ${session?.expiresAt?.let { it < kotlinx.datetime.Clock.System.now() }}")
+            // Log non-sensitive IDs for tracing
+            Log.d(TAG, "submitFormResponse: form_id=$requestId, order_id=$orderId")
             
             client.postgrest.rpc("submit_form_response", buildJsonObject {
                 put("p_form_id", requestId)
                 put("p_response", responseJson)
             })
             
-            Log.d(TAG, "submitFormResponse SUCCESS")
             Result.success(Unit)
         } catch (e: Exception) {
             val errorMsg = if (e is RestException) {
                 val code = e.error
                 val message = when {
-                    code == "not_allowed" -> "خطای عدم دسترسی (not_allowed). احتمالاً نشست شما منقضی شده یا هویت کاربر تغییر کرده است."
+                    code == "not_allowed" -> "خطای عدم دسترسی (not_allowed). هویت فعلی شما با مالک این فرم مطابقت ندارد."
                     code == "guest_session_mismatch" -> "خطای عدم تطابق نشست. لطفاً دوباره وارد شوید."
                     code == "form_not_pending" -> "این فرم قبلاً ارسال شده است."
                     code == "form_expired" -> "زمان پاسخگویی به این فرم به پایان رسیده است."
@@ -688,11 +701,11 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
                     code == "file_too_large" -> "حجم فایل بیش از حد مجاز است."
                     else -> "خطا در ارسال فرم: ${e.message}"
                 }
-                Log.e(TAG, "RPC submit_form_response failed ($code): ${e.description} | Details: ${e.message}")
+                Log.e(TAG, "RPC submit_form_response failed ($code): ${e.description}")
                 message
             } else {
                 Log.e(TAG, "Unexpected error in submitFormResponse", e)
-                "خطای غیرمنتظره در سیستم. لطفاً دوباره تلاش کنید."
+                "خطای غیرمنتظره در سیستم."
             }
             Result.failure(Exception(errorMsg))
         }
@@ -700,7 +713,7 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
 
     override suspend fun uploadFile(bucket: String, path: String, data: ByteArray, mimeType: String): Result<String> {
         return try {
-            ensureAuthSession()
+            if (!ensureAuthSession()) return Result.failure(Exception("AUTH_FAILED"))
             val bucketApi = client.storage.from(bucket)
             bucketApi.upload(path, data) {
                 upsert = true
@@ -721,11 +734,10 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
     ): Result<String> {
         return try {
             if (!ensureAuthSession()) {
-                return Result.failure(Exception("خطا در احراز هویت. نشست کاربری معتبر یافت نشد."))
+                return Result.failure(Exception("خطا در احراز هویت. نشست کاربری قبلی بازیابی نشد."))
             }
 
-            val user = client.auth.currentUserOrNull()
-            Log.d(TAG, "registerFormFile: form_request_id=$formRequestId, user_id=${user?.id}, file=$originalName")
+            Log.d(TAG, "registerFormFile: form_request_id=$formRequestId, file=$originalName")
             
             val response = client.postgrest.rpc("register_form_file", buildJsonObject {
                 put("p_form_request_id", formRequestId)
@@ -765,7 +777,7 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
     override suspend fun cancelService(orderId: String): Result<Unit> {
         Log.i(TAG, "CancelOrder: calling cancel_order, orderId=$orderId")
         return try {
-            ensureAuthSession()
+            if (!ensureAuthSession()) return Result.failure(Exception("AUTH_FAILED"))
             client.postgrest.rpc("cancel_order", buildJsonObject { put("p_order_id", JsonPrimitive(orderId)) })
             Log.i(TAG, "CancelOrder: success, orderId=$orderId. Clearing local access.")
             clearLocalAccess()
@@ -788,7 +800,7 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
 
     override suspend fun getLatestOrderEvent(guestKey: String): Result<LatestOrderEvent?> {
         return try {
-            ensureAuthSession()
+            if (!ensureAuthSession()) return Result.failure(Exception("AUTH_FAILED"))
             val response = client.postgrest.rpc("get_my_latest_order_event", buildJsonObject {
                 put("p_customer_key", JsonPrimitive(guestKey))
             })
@@ -842,7 +854,7 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
 
     override suspend fun getSupportChannels(): Result<List<SupportChannel>> {
         return try {
-            ensureAuthSession()
+            if (!ensureAuthSession()) return Result.success(emptyList())
             val dtos = client.postgrest.rpc("get_public_support_channels", buildJsonObject {}).decodeAs<List<SupportChannelDto>>()
             val domain = dtos.map { dto ->
                 SupportChannel(
@@ -889,7 +901,7 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
 
     override suspend fun getAppContent(key: String): Result<AppContent> {
         return try {
-            ensureAuthSession()
+            if (!ensureAuthSession()) return Result.success(AppContent("", ""))
             val response = client.postgrest.rpc("get_public_app_content", buildJsonObject {
                 put("p_key", key)
             })
@@ -951,7 +963,7 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
 
     override suspend fun getAnnouncements(): Result<List<AppAnnouncement>> {
         return try {
-            ensureAuthSession()
+            if (!ensureAuthSession()) return Result.success(emptyList())
             val dtos = client.postgrest.rpc("get_active_announcements", buildJsonObject {}).decodeAs<List<AnnouncementDto>>()
             val domain = dtos.map { dto ->
                 AppAnnouncement(
@@ -973,9 +985,10 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
     override suspend fun recordLogin(): Result<Unit> {
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                ensureAuthSession()
-                client.postgrest.rpc("record_my_login", buildJsonObject {})
-                Log.d(TAG, "Login recorded successfully (background)")
+                if (ensureAuthSession()) {
+                    client.postgrest.rpc("record_my_login", buildJsonObject {})
+                    Log.d(TAG, "Login recorded successfully (background)")
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to record login (background): ${e.message}")
             }
@@ -985,7 +998,7 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
 
     override suspend fun touchPresence(clientId: String): Result<Unit> {
         return try {
-            ensureAuthSession()
+            if (!ensureAuthSession()) return Result.failure(Exception("AUTH_FAILED"))
             client.postgrest.rpc("touch_my_presence", buildJsonObject {
                 put("p_client_id", clientId)
             })
@@ -997,7 +1010,7 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
 
     override suspend fun clearPresence(clientId: String): Result<Unit> {
         return try {
-            ensureAuthSession()
+            if (!ensureAuthSession()) return Result.failure(Exception("AUTH_FAILED"))
             client.postgrest.rpc("clear_my_presence", buildJsonObject {
                 put("p_client_id", clientId)
             })
@@ -1009,7 +1022,7 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
 
     override suspend fun getAdminUserPresence(): Result<List<AdminUserPresence>> {
         return try {
-            ensureAuthSession()
+            if (!ensureAuthSession()) return Result.failure(Exception("AUTH_FAILED"))
             val dtos = client.postgrest.rpc("get_admin_user_presence", buildJsonObject {}).decodeAs<List<AdminUserPresenceDto>>()
             val domain = dtos.map { dto ->
                 AdminUserPresence(
@@ -1054,7 +1067,7 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
 
     override suspend fun getNotifications(): Result<List<HamrahyarNotification>> {
         return try {
-            ensureAuthSession()
+            if (!ensureAuthSession()) return Result.failure(Exception("AUTH_FAILED"))
             val dtos = client.from("notifications").select {
                 order("created_at", Order.DESCENDING)
             }.decodeAs<List<NotificationDto>>()
@@ -1077,7 +1090,7 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
 
     override suspend fun markNotificationAsRead(id: String): Result<Unit> {
         return try {
-            ensureAuthSession()
+            if (!ensureAuthSession()) return Result.failure(Exception("AUTH_FAILED"))
             client.from("notifications").update(buildJsonObject { 
                 put("is_read", true) 
             }) {
@@ -1091,7 +1104,7 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
 
     override suspend fun getPriorityConfiguration(): List<PriorityConfig> {
         return try {
-            ensureAuthSession()
+            if (!ensureAuthSession()) return emptyList()
             val response = client.postgrest.rpc("get_customer_priority_options", buildJsonObject {})
             val options = response.decodeAs<List<PriorityOptionDto>>()
             options.map { dto ->
