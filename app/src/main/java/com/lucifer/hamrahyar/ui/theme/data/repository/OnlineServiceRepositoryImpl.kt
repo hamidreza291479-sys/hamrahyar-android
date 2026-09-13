@@ -66,45 +66,39 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
     private suspend fun ensureAuthSession(): Boolean = withContext(Dispatchers.IO) {
         authMutex.withLock {
             try {
-                // 1. Wait for Auth initialization if it's currently in progress
-                // This prevents creating a new anonymous session while the previous one is being restored from storage.
+                // 1. Wait for Auth initialization (restoration from PreferenceSessionManager)
                 client.auth.sessionStatus.first { it !is SessionStatus.Initializing }
                 
-                val currentStatus = client.auth.sessionStatus.value
                 val session = client.auth.currentSessionOrNull()
-                val user = client.auth.currentUserOrNull()
-                
                 val isExpired = session?.expiresAt?.let { it < kotlinx.datetime.Clock.System.now() } ?: true
                 
-                Log.d(TAG, "Auth Check: status=${currentStatus::class.simpleName}, user=${user?.id}, expired=$isExpired")
-
-                if (session == null || isExpired) {
-                    if (session != null) {
-                        Log.d(TAG, "Session expired, attempting refresh...")
+                if (session != null) {
+                    if (isExpired) {
+                        Log.d(TAG, "Auth: Session expired, attempting refresh...")
                         try {
                             client.auth.refreshCurrentSession()
-                            if (client.auth.currentSessionOrNull() != null) {
-                                Log.d(TAG, "Session refreshed successfully")
-                                return@withLock true
-                            }
+                            Log.d(TAG, "Auth: Session refreshed successfully. User: ${client.auth.currentUserOrNull()?.id}")
+                            return@withLock true
                         } catch (e: Exception) {
-                            Log.w(TAG, "Session refresh failed: ${e.message}")
+                            Log.e(TAG, "Auth: Session refresh failed: ${e.message}")
+                            // DO NOT call signInAnonymously() here if we already have a user, 
+                            // as it would create a NEW user and break ownership logic.
+                            return@withLock false 
                         }
                     }
-                    
-                    // 2. Only sign in anonymously if we truly have no valid session
-                    Log.d(TAG, "No valid session found. Requesting anonymous sign-in...")
-                    client.auth.signInAnonymously()
-                    val newSession = client.auth.currentSessionOrNull()
-                    Log.d(TAG, "Anonymous session created: user=${client.auth.currentUserOrNull()?.id}")
-                    newSession != null
-                } else {
-                    // Session is valid and authenticated
-                    true
+                    return@withLock true // Session is valid
                 }
+                
+                // 2. No session at all (First time or cleared storage)
+                Log.d(TAG, "Auth: No session found. Creating new anonymous user...")
+                client.auth.signInAnonymously()
+                val newSession = client.auth.currentSessionOrNull()
+                Log.d(TAG, "Auth: Anonymous user created: ${client.auth.currentUserOrNull()?.id}")
+                return@withLock newSession != null
+                
             } catch (e: Exception) {
-                Log.e(TAG, "Auth critical failure", e)
-                false
+                Log.e(TAG, "Auth: critical failure", e)
+                return@withLock false
             }
         }
     }
@@ -656,23 +650,36 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
 
     override suspend fun submitFormResponse(requestId: String, orderId: String, data: String): Result<Unit> {
         return try {
-            ensureAuthSession()
+            if (!ensureAuthSession()) {
+                return Result.failure(Exception("خطا در احراز هویت. نشست کاربری معتبر یافت نشد."))
+            }
+            
+            val session = client.auth.currentSessionOrNull()
             val user = client.auth.currentUserOrNull()
             val responseJson = Json.parseToJsonElement(data).jsonObject
             
-            // Log debug info (No sensitive tokens)
-            Log.d(TAG, "submitFormResponse: form_id=$requestId, order_id=$orderId, user_id=${user?.id}")
+            // Log non-sensitive debug info (REQUIRED for tracing root cause)
+            Log.d(TAG, "submitFormResponse START")
+            Log.d(TAG, "  - Form ID (p_form_id): $requestId")
+            Log.d(TAG, "  - Order ID: $orderId")
+            Log.d(TAG, "  - User ID: ${user?.id}")
+            Log.d(TAG, "  - Is Anonymous: ${user?.identities.isNullOrEmpty()}")
+            Log.d(TAG, "  - Session exists: ${session != null}")
+            Log.d(TAG, "  - Session Expired: ${session?.expiresAt?.let { it < kotlinx.datetime.Clock.System.now() }}")
             
             client.postgrest.rpc("submit_form_response", buildJsonObject {
                 put("p_form_id", requestId)
                 put("p_response", responseJson)
             })
+            
+            Log.d(TAG, "submitFormResponse SUCCESS")
             Result.success(Unit)
         } catch (e: Exception) {
             val errorMsg = if (e is RestException) {
                 val code = e.error
                 val message = when {
-                    code == "guest_session_mismatch" || code == "not_allowed" -> "خطای عدم تطابق نشست یا عدم دسترسی. لطفاً اپلیکیشن را کاملاً بسته و دوباره باز کنید."
+                    code == "not_allowed" -> "خطای عدم دسترسی (not_allowed). احتمالاً نشست شما منقضی شده یا هویت کاربر تغییر کرده است."
+                    code == "guest_session_mismatch" -> "خطای عدم تطابق نشست. لطفاً دوباره وارد شوید."
                     code == "form_not_pending" -> "این فرم قبلاً ارسال شده است."
                     code == "form_expired" -> "زمان پاسخگویی به این فرم به پایان رسیده است."
                     code.startsWith("required_field_missing:") -> "تکمیل تمامی فیلدهای الزامی ضروری است."
@@ -713,7 +720,10 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
         fileSize: Long
     ): Result<String> {
         return try {
-            ensureAuthSession()
+            if (!ensureAuthSession()) {
+                return Result.failure(Exception("خطا در احراز هویت. نشست کاربری معتبر یافت نشد."))
+            }
+
             val user = client.auth.currentUserOrNull()
             Log.d(TAG, "registerFormFile: form_request_id=$formRequestId, user_id=${user?.id}, file=$originalName")
             
