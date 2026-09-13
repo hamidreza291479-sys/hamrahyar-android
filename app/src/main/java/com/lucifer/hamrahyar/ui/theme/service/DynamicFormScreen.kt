@@ -103,7 +103,7 @@ fun DynamicFormScreen(
     
     // Clear values of hidden fields
     LaunchedEffect(visibleFields) {
-        val visibleKeys = visibleFields.map { it.key }.toSet()
+        val visibleKeys = visibleFields.map { it.realKey }.toSet()
         val toRemove = formValues.keys.filter { it !in visibleKeys && it !in listOf("full_name", "phone", "email") }
         toRemove.forEach { formValues.remove(it) }
     }
@@ -190,7 +190,7 @@ fun FormEditorView(
     Column(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.weight(1f).padding(horizontal = 24.dp).verticalScroll(rememberScrollState())) {
             fields.forEach { field ->
-                val fieldError = errors?.find { it.key == field.key }
+                val fieldError = errors?.find { it.key == field.realKey }
                 RenderField(field, formValues, fieldError)
                 Spacer(modifier = Modifier.height(16.dp))
             }
@@ -221,7 +221,7 @@ fun isFormValid(fields: List<FormField>, formValues: Map<String, String>): Boole
         } else field.required
         
         if (isRequired) {
-            val value = formValues[field.key]
+            val value = formValues[field.realKey]
             !value.isNullOrBlank() && value != "false"
         } else true
     }
@@ -230,7 +230,7 @@ fun isFormValid(fields: List<FormField>, formValues: Map<String, String>): Boole
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun RenderField(field: FormField, formValues: MutableMap<String, String>, error: com.lucifer.hamrahyar.ui.theme.data.model.FormFieldError? = null) {
-    val value = formValues[field.key] ?: ""
+    val value = formValues[field.realKey] ?: ""
     val label = field.label + if (field.required) " *" else ""
     val isError = error != null
 
@@ -240,7 +240,7 @@ fun RenderField(field: FormField, formValues: MutableMap<String, String>, error:
                 Text(label, fontFamily = Vazir, fontSize = 13.sp, color = if (isError) Color.Red else Color.White.copy(alpha = 0.7f), modifier = Modifier.padding(bottom = 8.dp))
                 OutlinedTextField(
                     value = value,
-                    onValueChange = { formValues[field.key] = it },
+                    onValueChange = { formValues[field.realKey] = it },
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(16.dp),
                     isError = isError,
@@ -259,7 +259,7 @@ fun RenderField(field: FormField, formValues: MutableMap<String, String>, error:
                 Text(label, fontFamily = Vazir, fontSize = 13.sp, color = if (isError) Color.Red else Color.White.copy(alpha = 0.7f), modifier = Modifier.padding(bottom = 8.dp))
                 OutlinedTextField(
                     value = value,
-                    onValueChange = { formValues[field.key] = it },
+                    onValueChange = { formValues[field.realKey] = it },
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(16.dp),
                     isError = isError,
@@ -301,14 +301,14 @@ fun RenderField(field: FormField, formValues: MutableMap<String, String>, error:
                     )
                     ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
                         options.forEach { option ->
-                            DropdownMenuItem(text = { Text(option) }, onClick = { formValues[field.key] = option; expanded = false })
+                            DropdownMenuItem(text = { Text(option) }, onClick = { formValues[field.realKey] = option; expanded = false })
                         }
                     }
                 }
             }
             "checkbox" -> {
-                Row(modifier = Modifier.fillMaxWidth().clickable { formValues[field.key] = if (value == "true") "false" else "true" }, verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(checked = value == "true", onCheckedChange = { formValues[field.key] = it.toString() }, colors = CheckboxDefaults.colors(checkedColor = Color(0xFF6C5CE7), uncheckedColor = if (isError) Color.Red else Color.White.copy(alpha = 0.4f)))
+                Row(modifier = Modifier.fillMaxWidth().clickable { formValues[field.realKey] = if (value == "true") "false" else "true" }, verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = value == "true", onCheckedChange = { formValues[field.realKey] = it.toString() }, colors = CheckboxDefaults.colors(checkedColor = Color(0xFF6C5CE7), uncheckedColor = if (isError) Color.Red else Color.White.copy(alpha = 0.4f)))
                     Text(label, fontFamily = Vazir, fontSize = 14.sp, color = if (isError) Color.Red else Color.White)
                 }
             }
@@ -335,7 +335,7 @@ fun RenderField(field: FormField, formValues: MutableMap<String, String>, error:
                     )
                     ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
                         provinces.forEach { province ->
-                            DropdownMenuItem(text = { Text(province) }, onClick = { formValues[field.key] = province; expanded = false })
+                            DropdownMenuItem(text = { Text(province) }, onClick = { formValues[field.realKey] = province; expanded = false })
                         }
                     }
                 }
@@ -369,20 +369,20 @@ fun RenderField(field: FormField, formValues: MutableMap<String, String>, error:
                     if (cities.isNotEmpty()) {
                         ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
                             cities.forEach { city ->
-                                DropdownMenuItem(text = { Text(city) }, onClick = { formValues[field.key] = city; expanded = false })
+                                DropdownMenuItem(text = { Text(city) }, onClick = { formValues[field.realKey] = city; expanded = false })
                             }
                         }
                     }
                 }
             }
             "plate" -> {
-                PlateInput(initialValue = value, onValueChange = { formValues[field.key] = it }, label = label, plateType = field.label)
+                PlateInput(initialValue = value, onValueChange = { formValues[field.realKey] = it }, label = label, plateType = field.label)
             }
             "date" -> {
                 Text(label, fontFamily = Vazir, fontSize = 13.sp, color = if (isError) Color.Red else Color.White.copy(alpha = 0.7f), modifier = Modifier.padding(bottom = 8.dp))
                 OutlinedTextField(
                     value = value,
-                    onValueChange = { formValues[field.key] = it },
+                    onValueChange = { formValues[field.realKey] = it },
                     modifier = Modifier.fillMaxWidth(),
                     placeholder = { Text("۱۴۰۳/۰۱/۰۱", color = Color.White.copy(alpha = 0.3f)) },
                     shape = RoundedCornerShape(16.dp),
@@ -400,7 +400,7 @@ fun RenderField(field: FormField, formValues: MutableMap<String, String>, error:
                 Text(label, fontFamily = Vazir, fontSize = 13.sp, color = if (isError) Color.Red else Color.White.copy(alpha = 0.7f), modifier = Modifier.padding(bottom = 8.dp))
                 OutlinedTextField(
                     value = value,
-                    onValueChange = { formValues[field.key] = it },
+                    onValueChange = { formValues[field.realKey] = it },
                     modifier = Modifier.fillMaxWidth(),
                     placeholder = { Text("۱۲:۰۰", color = Color.White.copy(alpha = 0.3f)) },
                     shape = RoundedCornerShape(16.dp),
@@ -440,9 +440,9 @@ fun ReviewView(
             ) {
                 Column(modifier = Modifier.padding(20.dp)) {
                     visibleFields.forEachIndexed { index, field ->
-                        val displayValue = if (field.type == "checkbox") (if (formValues[field.key] == "true") "بله" else "خیر") 
+                        val displayValue = if (field.type == "checkbox") (if (formValues[field.realKey] == "true") "بله" else "خیر") 
                                            else if (field.type == "password") "****"
-                                           else formValues[field.key] ?: "وارد نشده"
+                                           else formValues[field.realKey] ?: "وارد نشده"
                         
                         Row(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
                             Text(field.label + ":", fontFamily = Vazir, fontSize = 14.sp, color = Color.White.copy(alpha = 0.6f), modifier = Modifier.weight(1f))

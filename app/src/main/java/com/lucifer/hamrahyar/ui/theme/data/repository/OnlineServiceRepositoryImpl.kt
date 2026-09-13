@@ -635,12 +635,23 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
         return try {
             ensureAuthSession()
             val responseJson = Json.parseToJsonElement(data).jsonObject
+            
+            // Log payload summary (keys only) for debugging without leaking data
+            val keys = responseJson.keys.joinToString(", ")
+            Log.d(TAG, "submitFormResponse: form_id=$requestId, response_keys=[$keys]")
+            
             client.postgrest.rpc("submit_form_response", buildJsonObject {
                 put("p_form_id", requestId)
                 put("p_response", responseJson)
             })
             Result.success(Unit)
         } catch (e: Exception) {
+            val errorMsg = if (e is RestException) {
+                "RestException: status=${e.statusCode}, error=${e.error}, message=${e.message}, description=${e.description}"
+            } else {
+                "Exception: message=${e.message}\n${e.stackTraceToString()}"
+            }
+            Log.e(TAG, "submitFormResponse failed: $errorMsg")
             Result.failure(e)
         }
     }

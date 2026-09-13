@@ -139,7 +139,7 @@ data class ActiveServiceDto(
 data class ConversationDto(
     val id: String,
     @SerialName("order_id") val orderId: String,
-    @SerialName("customer_id") val customerId: String,
+    @SerialName("customer_id") val customerId: String? = null,
     @SerialName("operator_id") val operatorId: String? = null,
     val status: String
 )
@@ -337,7 +337,8 @@ data class FormCondition(
 
 @Serializable
 data class FormField(
-    val key: String,
+    val key: String? = null,
+    val id: String? = null,
     val label: String,
     val type: String,
     val required: Boolean = false,
@@ -350,7 +351,9 @@ data class FormField(
     val placeholder: String? = null,
     @SerialName("max_size_mb") val maxSizeMb: Int? = null,
     val description: String? = null
-)
+) {
+    val realKey: String get() = key ?: id ?: ""
+}
 
 @Serializable
 data class FormRequestDto(

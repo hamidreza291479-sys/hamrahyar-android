@@ -174,7 +174,7 @@ fun SubmittedFormView(fields: List<FormField>, formValues: Map<String, String>) 
             Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (fields.isNotEmpty()) {
                     fields.forEach { field ->
-                        val value = formValues[field.key] ?: "-"
+                        val value = formValues[field.realKey] ?: "-"
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                             Text(field.label, color = Color.White.copy(alpha = 0.5f), fontSize = 12.sp, fontFamily = Vazir)
                             Text(value, color = Color.White, fontSize = 12.sp, fontFamily = Vazir, fontWeight = FontWeight.Bold)
@@ -233,7 +233,7 @@ fun DynamicFormRenderer(
 fun isDynamicFormValid(fields: List<FormField>, formValues: Map<String, String>): Boolean {
     return fields.all { field ->
         if (field.required) {
-            val value = formValues[field.key]
+            val value = formValues[field.realKey]
             !value.isNullOrBlank()
         } else true
     }
@@ -249,7 +249,7 @@ fun DynamicField(
     onUploadingChange: (Boolean) -> Unit,
     onProgressChange: (String) -> Unit
 ) {
-    val value = formValues[field.key] ?: ""
+    val value = formValues[field.realKey] ?: ""
     val label = field.label + if (field.required) " *" else ""
     
     Column(modifier = Modifier.fillMaxWidth()) {
@@ -259,7 +259,7 @@ fun DynamicField(
             "text", "numeric" -> {
                 OutlinedTextField(
                     value = value,
-                    onValueChange = { formValues[field.key] = it },
+                    onValueChange = { formValues[field.realKey] = it },
                     modifier = Modifier.fillMaxWidth(),
                     placeholder = { Text(field.placeholder ?: "وارد کنید...", fontSize = 13.sp, color = Color.White.copy(alpha = 0.3f)) },
                     keyboardOptions = KeyboardOptions(keyboardType = if (field.type == "numeric") KeyboardType.Number else KeyboardType.Text),
@@ -279,16 +279,16 @@ fun DynamicField(
                     repository = repository,
                     orderId = orderId,
                     formRequestId = formRequestId,
-                    onFileUploaded = { fileId -> formValues[field.key] = fileId },
+                    onFileUploaded = { fileId -> formValues[field.realKey] = fileId },
                     onUploadingChange = onUploadingChange,
                     onProgressChange = onProgressChange
                 )
             }
             "plate_vehicle" -> {
-                PlateInput(plateType = "خودرو", initialValue = value, onValueChange = { formValues[field.key] = it }, label = label)
+                PlateInput(plateType = "خودرو", initialValue = value, onValueChange = { formValues[field.realKey] = it }, label = label)
             }
             "plate_motorcycle" -> {
-                PlateInput(plateType = "موتور", initialValue = value, onValueChange = { formValues[field.key] = it }, label = label)
+                PlateInput(plateType = "موتور", initialValue = value, onValueChange = { formValues[field.realKey] = it }, label = label)
             }
             else -> {
                 Text("نوع فیلد '${field.type}' پشتیبانی نمی‌شود.", color = Color.Gray, fontSize = 11.sp, fontFamily = Vazir)
