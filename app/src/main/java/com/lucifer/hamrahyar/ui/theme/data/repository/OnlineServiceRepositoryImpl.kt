@@ -14,6 +14,8 @@ import com.lucifer.hamrahyar.ui.theme.utils.IconMapper
 import com.lucifer.hamrahyar.ui.theme.utils.PreferenceManager
 import com.lucifer.hamrahyar.ui.theme.utils.StyleMapper
 import io.github.jan.supabase.auth.auth
+import io.github.jan.supabase.auth.status.SessionStatus
+import io.github.jan.supabase.auth.user.UserSession
 import io.github.jan.supabase.postgrest.postgrest
 import io.github.jan.supabase.postgrest.from
 import io.github.jan.supabase.postgrest.query.Order
@@ -32,6 +34,8 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.*
 import kotlinx.serialization.encodeToString
 import kotlinx.datetime.*
@@ -57,41 +61,51 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
         return newKey
     }
 
-    private suspend fun ensureAuthSession(): Boolean = withContext(Dispatchers.IO) {
-        try {
-            val session = client.auth.currentSessionOrNull()
-            val user = client.auth.currentUserOrNull()
-            val isExpired = session?.expiresAt?.let { it < kotlinx.datetime.Clock.System.now() } ?: true
-            val isAnonymous = user?.identities.isNullOrEmpty()
-            
-            Log.d(TAG, "Auth Check: session=${session != null}, user=${user?.id}, expired=$isExpired, is_anon=$isAnonymous")
+    private val authMutex = Mutex()
 
-            if (session == null || isExpired) {
-                if (session != null) {
-                    Log.d(TAG, "Session expired, attempting refresh...")
-                    try {
-                        client.auth.refreshCurrentSession()
-                        if (client.auth.currentSessionOrNull() != null) {
-                            Log.d(TAG, "Session refreshed successfully")
-                            return@withContext true
-                        }
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Session refresh failed: ${e.message}")
-                    }
-                }
+    private suspend fun ensureAuthSession(): Boolean = withContext(Dispatchers.IO) {
+        authMutex.withLock {
+            try {
+                // 1. Wait for Auth initialization if it's currently in progress
+                // This prevents creating a new anonymous session while the previous one is being restored from storage.
+                client.auth.sessionStatus.first { it !is SessionStatus.Initializing }
                 
-                // If we still don't have a valid session, sign in anonymously
-                Log.d(TAG, "Requesting anonymous sign-in...")
-                client.auth.signInAnonymously()
-                val newSession = client.auth.currentSessionOrNull()
-                Log.d(TAG, "New session created: user=${client.auth.currentUserOrNull()?.id}")
-                newSession != null
-            } else {
-                true
+                val currentStatus = client.auth.sessionStatus.value
+                val session = client.auth.currentSessionOrNull()
+                val user = client.auth.currentUserOrNull()
+                
+                val isExpired = session?.expiresAt?.let { it < kotlinx.datetime.Clock.System.now() } ?: true
+                
+                Log.d(TAG, "Auth Check: status=${currentStatus::class.simpleName}, user=${user?.id}, expired=$isExpired")
+
+                if (session == null || isExpired) {
+                    if (session != null) {
+                        Log.d(TAG, "Session expired, attempting refresh...")
+                        try {
+                            client.auth.refreshCurrentSession()
+                            if (client.auth.currentSessionOrNull() != null) {
+                                Log.d(TAG, "Session refreshed successfully")
+                                return@withLock true
+                            }
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Session refresh failed: ${e.message}")
+                        }
+                    }
+                    
+                    // 2. Only sign in anonymously if we truly have no valid session
+                    Log.d(TAG, "No valid session found. Requesting anonymous sign-in...")
+                    client.auth.signInAnonymously()
+                    val newSession = client.auth.currentSessionOrNull()
+                    Log.d(TAG, "Anonymous session created: user=${client.auth.currentUserOrNull()?.id}")
+                    newSession != null
+                } else {
+                    // Session is valid and authenticated
+                    true
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Auth critical failure", e)
+                false
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Auth critical failure", e)
-            false
         }
     }
 
@@ -646,7 +660,7 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
             val user = client.auth.currentUserOrNull()
             val responseJson = Json.parseToJsonElement(data).jsonObject
             
-            // Log non-sensitive debug info
+            // Log debug info (No sensitive tokens)
             Log.d(TAG, "submitFormResponse: form_id=$requestId, order_id=$orderId, user_id=${user?.id}")
             
             client.postgrest.rpc("submit_form_response", buildJsonObject {
@@ -658,7 +672,7 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
             val errorMsg = if (e is RestException) {
                 val code = e.error
                 val message = when {
-                    code == "guest_session_mismatch" -> "خطای عدم تطابق نشست. لطفاً دوباره وارد شوید."
+                    code == "guest_session_mismatch" || code == "not_allowed" -> "خطای عدم تطابق نشست یا عدم دسترسی. لطفاً اپلیکیشن را کاملاً بسته و دوباره باز کنید."
                     code == "form_not_pending" -> "این فرم قبلاً ارسال شده است."
                     code == "form_expired" -> "زمان پاسخگویی به این فرم به پایان رسیده است."
                     code.startsWith("required_field_missing:") -> "تکمیل تمامی فیلدهای الزامی ضروری است."
@@ -667,7 +681,7 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
                     code == "file_too_large" -> "حجم فایل بیش از حد مجاز است."
                     else -> "خطا در ارسال فرم: ${e.message}"
                 }
-                Log.e(TAG, "RPC Error ($code): ${e.description} | Details: ${e.message}")
+                Log.e(TAG, "RPC submit_form_response failed ($code): ${e.description} | Details: ${e.message}")
                 message
             } else {
                 Log.e(TAG, "Unexpected error in submitFormResponse", e)
@@ -700,6 +714,9 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
     ): Result<String> {
         return try {
             ensureAuthSession()
+            val user = client.auth.currentUserOrNull()
+            Log.d(TAG, "registerFormFile: form_request_id=$formRequestId, user_id=${user?.id}, file=$originalName")
+            
             val response = client.postgrest.rpc("register_form_file", buildJsonObject {
                 put("p_form_request_id", formRequestId)
                 put("p_original_name", originalName)
@@ -708,12 +725,17 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
                 put("p_file_size", fileSize)
             })
             
-            // Assuming the RPC returns the file ID as a string or in a JsonPrimitive
             val fileId = response.decodeAs<String>()
             Result.success(fileId)
         } catch (e: Exception) {
-            Log.e(TAG, "Register form file failed: ${e.message}")
-            Result.failure(e)
+            val errorMsg = if (e is RestException) {
+                Log.e(TAG, "RPC register_form_file failed (${e.error}): ${e.description}")
+                "خطا در ثبت فایل: ${e.message}"
+            } else {
+                Log.e(TAG, "Unexpected error in registerFormFile", e)
+                "خطای غیرمنتظره در ثبت فایل."
+            }
+            Result.failure(Exception(errorMsg))
         }
     }
 
