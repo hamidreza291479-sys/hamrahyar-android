@@ -59,7 +59,7 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
     private suspend fun ensureAuthSession(): Boolean = withContext(Dispatchers.IO) {
         try {
             val session = client.auth.currentSessionOrNull()
-            if (session == null || (session.expiresAt != null && session.expiresAt!! < kotlinx.datetime.Clock.System.now())) {
+            if (session == null || (session.expiresAt != null && session.expiresAt < kotlinx.datetime.Clock.System.now())) {
                 Log.d(TAG, "No valid session found or expired, attempting refresh...")
                 try {
                     client.auth.refreshCurrentSession()
@@ -252,7 +252,7 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
             if (summary?.order != null && summary.order.id != null) {
                 val orderDto = summary.order
                 val adminDto = summary.admin
-                val orderId = orderDto.id!!
+                val orderId = orderDto.id
                 
                 val conversationId = orderDto.conversationId ?: run {
                     Log.d(TAG, "OrderRepository: conversation lookup fallback for orderId=$orderId")
@@ -330,63 +330,81 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
         ensureAuthSession()
         var currentList = emptyList<ChatMessage>()
         Log.d(TAG, "OrderRepository: subscribing to messages conversation=$conversationId")
+        
         val channel = client.realtime.channel("chat_$conversationId")
         val changeFlow = channel.postgresChangeFlow<PostgresAction>(schema = "public") { 
             table = "messages" 
             filter(FilterOperation("conversation_id", FilterOperator.EQ, conversationId))
         }
         
-        val job = launch {
+        val fetchMessages = suspend {
             try {
                 val messages = client.from("messages").select {
                     filter { eq("conversation_id", conversationId) }
                     order("created_at", Order.ASCENDING)
                 }.decodeAs<List<MessageDto>>()
-                currentList = messages.map { it.toDomain(profileId) }
-                Log.d(TAG, "Loaded ${currentList.size} messages for conversation=$conversationId")
-                trySend(currentList)
-            } catch (e: Exception) { 
-                Log.e(TAG, "Error fetching messages for conversation=$conversationId: ${e.message}", e)
+                
+                // Merge and avoid duplicates
+                val newMessages = messages.map { it.toDomain(profileId) }
+                val merged = (currentList + newMessages).distinctBy { it.id }.sortedBy { it.timestamp }
+                
+                if (merged.size != currentList.size) {
+                    currentList = merged
+                    trySend(currentList)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error fetching messages for $conversationId: ${e.message}")
             }
+        }
 
+        val statusJob = launch {
+            client.realtime.status.collect { status ->
+                if (status == Realtime.Status.CONNECTED) {
+                    Log.d(TAG, "Chat Realtime connected/reconnected for $conversationId")
+                    fetchMessages()
+                }
+            }
+        }
+
+        val eventJob = launch {
             changeFlow.collect { action ->
                 try {
                     when (action) {
                         is PostgresAction.Insert -> {
                             val newMsgDto = json.decodeFromJsonElement<MessageDto>(action.record)
-                            if (newMsgDto.conversationId == conversationId) {
-                                val newMsg = newMsgDto.toDomain(profileId)
-                                if (!currentList.any { it.id == newMsg.id }) {
-                                    currentList = currentList + newMsg
-                                    trySend(currentList)
-                                }
+                            val newMsg = newMsgDto.toDomain(profileId)
+                            if (!currentList.any { it.id == newMsg.id }) {
+                                currentList = (currentList + newMsg).sortedBy { it.timestamp }
+                                trySend(currentList)
                             }
                         }
                         is PostgresAction.Update -> {
                             val updatedMsgDto = json.decodeFromJsonElement<MessageDto>(action.record)
-                            if (updatedMsgDto.conversationId == conversationId) {
-                                val updatedMsg = updatedMsgDto.toDomain(profileId)
-                                currentList = currentList.map { if (it.id == updatedMsg.id) updatedMsg else it }
-                                trySend(currentList)
-                            }
+                            val updatedMsg = updatedMsgDto.toDomain(profileId)
+                            currentList = currentList.map { if (it.id == updatedMsg.id) updatedMsg else it }
+                            trySend(currentList)
+                        }
+                        is PostgresAction.Delete -> {
+                            fetchMessages() // Simplest way to handle deletes
                         }
                         else -> {}
                     }
                 } catch (e: Exception) { 
-                    Log.e(TAG, "Error processing realtime message for conversation=$conversationId: ${e.message}", e)
+                    Log.e(TAG, "Error processing realtime message: ${e.message}")
                 }
             }
         }
         
         channel.subscribe()
+        fetchMessages() // Initial fetch
+
         awaitClose { 
-            job.cancel()
+            statusJob.cancel()
+            eventJob.cancel()
             runBlocking {
                 try {
                     channel.unsubscribe()
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error unsubscribing from chat channel: ${e.message}")
-                }
+                } catch (e: Exception) { }
             }
         }
     }
@@ -406,22 +424,27 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
         ensureAuthSession()
         val guestKey = getOrCreateGuestKey()
         
-        // Use a single channel for all order-related tables to ensure synchronization
+        Log.d(TAG, "OrderRepository: starting observeOrderUpdates for guest=$guestKey")
         val orderChannel = client.realtime.channel("order_tracking_$guestKey")
-        
         val ordersFlow = orderChannel.postgresChangeFlow<PostgresAction>(schema = "public") { table = "orders" }
         
         val resyncAndSend = suspend {
-            getMyActiveOrder(guestKey).onSuccess { active ->
-                if (active != null) trySend(active)
+            try {
+                getMyActiveOrder(guestKey).onSuccess { active ->
+                    if (active != null) {
+                        Log.d(TAG, "OrderRepository: emitting updated order ${active.orderId}, status=${active.status}")
+                        trySend(active)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error in resyncAndSend: ${e.message}")
             }
         }
 
-        val job = launch {
-            // Monitor Connection State for Resync
+        val statusJob = launch {
             client.realtime.status.collect { status ->
                 if (status == Realtime.Status.CONNECTED) {
-                    Log.d(TAG, "Realtime reconnected, resyncing orders...")
+                    Log.d(TAG, "Order Realtime connected, resyncing...")
                     resyncAndSend()
                 }
             }
@@ -429,31 +452,44 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
 
         val eventJob = launch {
             ordersFlow.collect { action ->
-                when (action) {
-                    is PostgresAction.Insert, is PostgresAction.Update -> {
-                        val record = if (action is PostgresAction.Insert) action.record else (action as PostgresAction.Update).record
-                        val orderDto = json.decodeFromJsonElement<OrderDto>(record)
-                        val orderGuestKey = orderDto.formData?.get("guest_key")?.jsonPrimitive?.content
-                        if (orderGuestKey == guestKey) {
+                try {
+                    when (action) {
+                        is PostgresAction.Insert, is PostgresAction.Update -> {
+                            val record = if (action is PostgresAction.Insert) action.record else (action as PostgresAction.Update).record
+                            val orderDto = json.decodeFromJsonElement<OrderDto>(record)
+                            val orderGuestKey = orderDto.formData?.get("guest_key")?.jsonPrimitive?.content
+                            
+                            if (orderGuestKey == guestKey) {
+                                Log.d(TAG, "Order Realtime UPDATE detected for guestKey")
+                                resyncAndSend()
+                            }
+                        }
+                        is PostgresAction.Delete -> {
+                            val deletedId = action.oldRecord["id"]?.jsonPrimitive?.content
+                            Log.d(TAG, "Order Realtime DELETE detected: orderId=$deletedId")
+                            // We need to notify that this specific order is gone
+                            // For simplicity, we trigger a resync which will return null if no order is active
                             resyncAndSend()
                         }
+                        else -> {}
                     }
-                    is PostgresAction.Delete -> {
-                        // If current active order is deleted, we should notify the UI
-                        resyncAndSend()
-                    }
-                    else -> {}
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error processing order event: ${e.message}")
                 }
             }
         }
 
         orderChannel.subscribe()
-        resyncAndSend() // Initial Snapshot
+        resyncAndSend() 
 
         awaitClose {
-            job.cancel()
+            statusJob.cancel()
             eventJob.cancel()
-            runBlocking { orderChannel.unsubscribe() }
+            runBlocking { 
+                try {
+                    orderChannel.unsubscribe() 
+                } catch (e: Exception) {}
+            }
         }
     }
 
@@ -495,36 +531,15 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
     override fun observeServices(): Flow<Unit> = emptyFlow()
     override fun observeRealtimeStatus(): Flow<String> = client.realtime.status.map { it.name }
 
-    override fun observeFormRequests(orderId: String): Flow<List<FormRequestDto>> = callbackFlow {
+    override fun observeFormRequests(conversationId: String): Flow<List<FormRequestDto>> = callbackFlow {
         ensureAuthSession()
         
+        var currentForms = emptyList<FormRequestDto>()
         var activeChannel: RealtimeChannel? = null
         
         val job = launch {
-            Log.d(TAG, "OrderRepository: starting observeFormRequests for orderId=$orderId")
+            Log.d(TAG, "OrderRepository: observeFormRequests for conversationId=$conversationId")
             
-            var conversationId: String? = null
-            
-            // Try fetching active order summary first to get conversation_id efficiently
-            val guestKey = getOrCreateGuestKey()
-            getMyActiveOrder(guestKey).onSuccess { active ->
-                if (active?.orderId == orderId) {
-                    conversationId = active.conversationId
-                }
-            }
-            
-            if (conversationId == null) {
-                Log.d(TAG, "OrderRepository: conversationId not in current active order, trying fallback for orderId=$orderId")
-                conversationId = getConversationForOrder(orderId).getOrNull()
-            }
-            
-            if (conversationId == null) {
-                Log.e(TAG, "OrderRepository: Failed to resolve conversationId for orderId=$orderId after retries")
-                trySend(emptyList())
-                return@launch
-            }
-
-            Log.d(TAG, "OrderRepository: subscribing to forms conversation=$conversationId")
             val channel = client.realtime.channel("forms_$conversationId")
             activeChannel = channel
             
@@ -539,25 +554,27 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
                         filter { eq("conversation_id", conversationId) }
                         order("created_at", Order.ASCENDING)
                     }.decodeAs<List<FormRequestDto>>()
-                    trySend(forms)
+                    
+                    currentForms = forms
+                    trySend(currentForms)
                 } catch (e: Exception) {
-                    Log.e(TAG, "Error fetching forms for conversation $conversationId: ${e.message}")
+                    Log.e(TAG, "Error fetching forms for $conversationId: ${e.message}")
+                }
+            }
+
+            launch {
+                client.realtime.status.collect { status ->
+                    if (status == Realtime.Status.CONNECTED) {
+                        Log.d(TAG, "Forms Realtime connected for $conversationId")
+                        fetchForms()
+                    }
                 }
             }
 
             launch {
                 formsFlow.collect { action ->
-                    val record = when (action) {
-                        is PostgresAction.Insert -> action.record
-                        is PostgresAction.Update -> action.record
-                        else -> null
-                    }
-                    if (record != null) {
-                        val fConvId = record["conversation_id"]?.jsonPrimitive?.content
-                        if (fConvId == conversationId) fetchForms()
-                    } else if (action is PostgresAction.Delete) {
-                        fetchForms()
-                    }
+                    Log.d(TAG, "Form Realtime event: ${action::class.simpleName} for $conversationId")
+                    fetchForms()
                 }
             }
 
@@ -575,13 +592,13 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
         }
     }
 
-    override fun observeFormResponses(orderId: String): Flow<List<FormResponseDto>> = observeFormRequests(orderId).map { requests ->
+    override fun observeFormResponses(conversationId: String): Flow<List<FormResponseDto>> = observeFormRequests(conversationId).map { requests ->
         requests.mapNotNull { req ->
             req.response?.let {
                 FormResponseDto(
                     id = null,
                     requestId = req.id,
-                    orderId = orderId,
+                    orderId = "", // Deprecated
                     data = it,
                     createdAt = req.submittedAt ?: req.createdAt
                 )
@@ -607,10 +624,10 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
         id = id ?: "", requestId = "", 
         senderRole = when {
             messageType == "system" -> "SYSTEM"
-            senderId == currentUserId -> "CUSTOMER"
+            senderId != null && senderId == currentUserId -> "CUSTOMER"
             else -> "ADMIN"
         },
-        content = body,
+        content = body ?: "",
         timestamp = parseCreatedAt(createdAt) ?: System.currentTimeMillis(),
         type = messageType,
         attachments = emptyList()
@@ -621,7 +638,8 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
         return try {
             ensureAuthSession()
             client.postgrest.rpc("cancel_order", buildJsonObject { put("p_order_id", JsonPrimitive(orderId)) })
-            Log.i(TAG, "CancelOrder: success, orderId=$orderId")
+            Log.i(TAG, "CancelOrder: success, orderId=$orderId. Clearing local access.")
+            clearLocalAccess()
             Result.success(Unit)
         } catch (e: Exception) {
             val errorDetails = if (e is RestException) {
@@ -630,6 +648,11 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
                 "type=${e::class.java.simpleName}, message=${e.message}"
             }
             Log.e(TAG, "CancelOrder: FAILED, orderId=$orderId, $errorDetails")
+            // Even if RPC fails, if it's because order is already gone (404), we should clear local
+            if (e is RestException && e.statusCode == 404) {
+                clearLocalAccess()
+                return Result.success(Unit)
+            }
             Result.failure(e)
         }
     }
@@ -819,14 +842,16 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
     }
 
     override suspend fun recordLogin(): Result<Unit> {
-        return try {
-            ensureAuthSession()
-            client.postgrest.rpc("record_my_login", buildJsonObject {})
-            Result.success(Unit)
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to record login: ${e.message}")
-            Result.failure(e)
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                ensureAuthSession()
+                client.postgrest.rpc("record_my_login", buildJsonObject {})
+                Log.d(TAG, "Login recorded successfully (background)")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to record login (background): ${e.message}")
+            }
         }
+        return Result.success(Unit)
     }
 
     override suspend fun touchPresence(clientId: String): Result<Unit> {

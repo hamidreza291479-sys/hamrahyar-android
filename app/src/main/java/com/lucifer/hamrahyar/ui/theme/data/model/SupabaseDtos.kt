@@ -145,10 +145,10 @@ data class ConversationDto(
 @Serializable
 data class MessageDto(
     val id: String? = null,
-    @SerialName("conversation_id") val conversationId: String,
-    @SerialName("sender_id") val senderId: String,
+    @SerialName("conversation_id") val conversationId: String? = null,
+    @SerialName("sender_id") val senderId: String? = null,
     @SerialName("message_type") val messageType: String = "text",
-    val body: String,
+    val body: String? = null,
     val payload: JsonObject = JsonObject(emptyMap()),
     @SerialName("reply_to_id") val replyToId: String? = null,
     @SerialName("read_at") val readAt: String? = null,

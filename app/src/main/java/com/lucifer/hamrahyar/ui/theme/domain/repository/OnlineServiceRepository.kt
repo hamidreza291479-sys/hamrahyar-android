@@ -49,9 +49,9 @@ interface OnlineServiceRepository {
 
     fun observeRealtimeStatus(): Flow<String>
 
-    fun observeFormRequests(orderId: String): Flow<List<FormRequestDto>>
+    fun observeFormRequests(conversationId: String): Flow<List<FormRequestDto>>
 
-    fun observeFormResponses(orderId: String): Flow<List<FormResponseDto>>
+    fun observeFormResponses(conversationId: String): Flow<List<FormResponseDto>>
     
     suspend fun submitFormResponse(requestId: String, orderId: String, data: String): Result<Unit>
 

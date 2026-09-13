@@ -68,10 +68,6 @@ fun ChatScreen(
     var formRequests by remember { mutableStateOf<List<FormRequestDto>>(emptyList()) }
     var formResponses by remember { mutableStateOf<List<FormResponseDto>>(emptyList()) }
     
-    LaunchedEffect(request.id) {
-        launch { repository.observeFormRequests(request.id).collectLatest { formRequests = it } }
-        launch { repository.observeFormResponses(request.id).collectLatest { formResponses = it } }
-    }
     val listState = rememberLazyListState()
     
     LaunchedEffect(Unit) {
@@ -84,6 +80,13 @@ fun ChatScreen(
 
     LaunchedEffect(request.conversationId) {
         request.conversationId?.let { conversationId = it }
+    }
+
+    LaunchedEffect(conversationId) {
+        if (conversationId.isNotEmpty()) {
+            launch { repository.observeFormRequests(conversationId).collectLatest { formRequests = it } }
+            launch { repository.observeFormResponses(conversationId).collectLatest { formResponses = it } }
+        }
     }
 
     LaunchedEffect(conversationId, request.profileId) {
@@ -489,6 +492,7 @@ fun ChatBottomBar(
             val footerText = when {
                 isClosed -> "این گفتگو بسته شده است."
                 isSubmitted -> "درخواست شما ثبت شده و بزودی گفتگو با کارشناس آغاز می‌شود."
+                conversationId.isNotEmpty() -> "کارشناسان فرم های مربوط را برای شما ارسال می کنند."
                 else -> "در حال آماده‌سازی گفتگو..."
             }
             

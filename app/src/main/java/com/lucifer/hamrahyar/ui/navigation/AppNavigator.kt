@@ -256,12 +256,11 @@ fun AppNavigator(repository: OnlineServiceRepository) {
         // Observation Jobs
         launch {
             repository.observeOrderUpdates().collect { updated ->
-                val index = activeServicesList.indexOfFirst { it.orderId == updated.orderId }
-                if (index != -1) {
-                    activeServicesList[index] = updated
-                } else {
-                    activeServicesList.add(updated)
-                }
+                // Check if the order was deleted (null from getMyActiveOrder summary)
+                // Actually, our repository logic returns null if the order is not found.
+                // But updated here is ActiveService. 
+                // We should handle deletion by checking if the update stream can signal it.
+                // The current observeOrderUpdates emits the result of getMyActiveOrder.
                 
                 if (activeRequest?.id == updated.orderId) {
                     activeRequest = activeRequest?.copy(
@@ -282,6 +281,13 @@ fun AppNavigator(repository: OnlineServiceRepository) {
                         discountAmount = updated.discountAmount,
                         totalAmount = updated.totalAmount
                     )
+                }
+                
+                val index = activeServicesList.indexOfFirst { it.orderId == updated.orderId }
+                if (index != -1) {
+                    activeServicesList[index] = updated
+                } else {
+                    activeServicesList.add(updated)
                 }
             }
         }
@@ -309,6 +315,10 @@ fun AppNavigator(repository: OnlineServiceRepository) {
                                 val index = activeServicesList.indexOfFirst { it.orderId == recovered.orderId }
                                 if (index != -1) activeServicesList[index] = recovered
                                 else activeServicesList.add(recovered)
+                            } else {
+                                // Order is gone (cancelled/deleted)
+                                activeRequest = null
+                                activeServicesList.clear()
                             }
                         }
                     }
