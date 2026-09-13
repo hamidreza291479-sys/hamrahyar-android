@@ -60,28 +60,37 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
     private suspend fun ensureAuthSession(): Boolean = withContext(Dispatchers.IO) {
         try {
             val session = client.auth.currentSessionOrNull()
-            if (session == null || (session.expiresAt != null && session.expiresAt < kotlinx.datetime.Clock.System.now())) {
-                Log.d(TAG, "No valid session found or expired, attempting refresh...")
-                try {
-                    client.auth.refreshCurrentSession()
-                    if (client.auth.currentSessionOrNull() != null) {
-                        Log.d(TAG, "Session refreshed successfully")
-                        return@withContext true
+            val user = client.auth.currentUserOrNull()
+            val isExpired = session?.expiresAt?.let { it < kotlinx.datetime.Clock.System.now() } ?: true
+            val isAnonymous = user?.identities.isNullOrEmpty()
+            
+            Log.d(TAG, "Auth Check: session=${session != null}, user=${user?.id}, expired=$isExpired, is_anon=$isAnonymous")
+
+            if (session == null || isExpired) {
+                if (session != null) {
+                    Log.d(TAG, "Session expired, attempting refresh...")
+                    try {
+                        client.auth.refreshCurrentSession()
+                        if (client.auth.currentSessionOrNull() != null) {
+                            Log.d(TAG, "Session refreshed successfully")
+                            return@withContext true
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Session refresh failed: ${e.message}")
                     }
-                } catch (e: Exception) {
-                    Log.d(TAG, "Session refresh failed: ${e.message}")
                 }
                 
-                Log.d(TAG, "Signing in anonymously...")
+                // If we still don't have a valid session, sign in anonymously
+                Log.d(TAG, "Requesting anonymous sign-in...")
                 client.auth.signInAnonymously()
                 val newSession = client.auth.currentSessionOrNull()
-                Log.d(TAG, "New session created: ${newSession?.accessToken?.take(10)}...")
+                Log.d(TAG, "New session created: user=${client.auth.currentUserOrNull()?.id}")
                 newSession != null
             } else {
                 true
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Auth critical failure: ${e.message}")
+            Log.e(TAG, "Auth critical failure", e)
             false
         }
     }
@@ -634,11 +643,11 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
     override suspend fun submitFormResponse(requestId: String, orderId: String, data: String): Result<Unit> {
         return try {
             ensureAuthSession()
+            val user = client.auth.currentUserOrNull()
             val responseJson = Json.parseToJsonElement(data).jsonObject
             
-            // Log payload summary (keys only) for debugging without leaking data
-            val keys = responseJson.keys.joinToString(", ")
-            Log.d(TAG, "submitFormResponse: form_id=$requestId, response_keys=[$keys]")
+            // Log non-sensitive debug info
+            Log.d(TAG, "submitFormResponse: form_id=$requestId, order_id=$orderId, user_id=${user?.id}")
             
             client.postgrest.rpc("submit_form_response", buildJsonObject {
                 put("p_form_id", requestId)
@@ -647,12 +656,24 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
             Result.success(Unit)
         } catch (e: Exception) {
             val errorMsg = if (e is RestException) {
-                "RestException: status=${e.statusCode}, error=${e.error}, message=${e.message}, description=${e.description}"
+                val code = e.error
+                val message = when {
+                    code == "guest_session_mismatch" -> "خطای عدم تطابق نشست. لطفاً دوباره وارد شوید."
+                    code == "form_not_pending" -> "این فرم قبلاً ارسال شده است."
+                    code == "form_expired" -> "زمان پاسخگویی به این فرم به پایان رسیده است."
+                    code.startsWith("required_field_missing:") -> "تکمیل تمامی فیلدهای الزامی ضروری است."
+                    code.startsWith("invalid_numeric_field:") -> "مقدار عددی وارد شده معتبر نیست."
+                    code == "file_not_found" -> "فایل‌های پیوست یافت نشدند."
+                    code == "file_too_large" -> "حجم فایل بیش از حد مجاز است."
+                    else -> "خطا در ارسال فرم: ${e.message}"
+                }
+                Log.e(TAG, "RPC Error ($code): ${e.description} | Details: ${e.message}")
+                message
             } else {
-                "Exception: message=${e.message}\n${e.stackTraceToString()}"
+                Log.e(TAG, "Unexpected error in submitFormResponse", e)
+                "خطای غیرمنتظره در سیستم. لطفاً دوباره تلاش کنید."
             }
-            Log.e(TAG, "submitFormResponse failed: $errorMsg")
-            Result.failure(e)
+            Result.failure(Exception(errorMsg))
         }
     }
 

@@ -15,6 +15,7 @@ import com.lucifer.hamrahyar.ui.theme.data.repository.OnlineServiceRepositoryImp
 class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        com.lucifer.hamrahyar.ui.theme.data.remote.SupabaseClient.init(this)
         setContent {
             val preferenceManager = remember { PreferenceManager(this) }
             val repository = remember { OnlineServiceRepositoryImpl(this) }
