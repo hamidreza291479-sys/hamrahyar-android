@@ -1288,6 +1288,100 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
         }
     }
 
+    override fun observeInvoiceForOrder(orderId: String): Flow<InvoiceDto?> = callbackFlow {
+        if (orderId.isBlank() || !ensureAuthSession()) {
+            trySend(null)
+            close()
+            return@callbackFlow
+        }
+
+        var activeChannel: RealtimeChannel? = null
+
+        val fetchInvoice = suspend {
+            try {
+                getInvoiceForOrder(orderId).onSuccess { invoice ->
+                    trySend(invoice)
+                }.onFailure {
+                    Log.e(TAG, "Failed to fetch invoice for order $orderId")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error fetching invoice for order $orderId: ${e.message}")
+            }
+        }
+
+        val job = launch {
+            Log.d(TAG, "OrderRepository: observeInvoiceForOrder for orderId=$orderId")
+
+            val channel = client.realtime.channel("invoice_$orderId")
+            activeChannel = channel
+
+            val invoiceFlow = channel.postgresChangeFlow<PostgresAction>(schema = "public") {
+                table = "invoices"
+                filter(FilterOperation("order_id", FilterOperator.EQ, orderId))
+            }
+
+            val paymentFlow = channel.postgresChangeFlow<PostgresAction>(schema = "public") {
+                table = "payments"
+                filter(FilterOperation("order_id", FilterOperator.EQ, orderId))
+            }
+
+            launch {
+                client.realtime.status.collect { status ->
+                    if (status == Realtime.Status.CONNECTED) {
+                        Log.d(TAG, "Invoice Realtime connected for $orderId. Resyncing...")
+                        fetchInvoice()
+                    }
+                }
+            }
+
+            launch {
+                invoiceFlow.collect { action ->
+                    try {
+                        when (action) {
+                            is PostgresAction.Insert, is PostgresAction.Update, is PostgresAction.Delete -> {
+                                Log.d(TAG, "Invoice Realtime change detected for order $orderId")
+                                fetchInvoice()
+                            }
+                            else -> {}
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error processing invoice realtime event: ${e.message}")
+                        fetchInvoice()
+                    }
+                }
+            }
+
+            launch {
+                paymentFlow.collect { action ->
+                    try {
+                        when (action) {
+                            is PostgresAction.Insert, is PostgresAction.Update, is PostgresAction.Delete -> {
+                                Log.d(TAG, "Payment Realtime change detected for order $orderId")
+                                fetchInvoice()
+                            }
+                            else -> {}
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error processing payment realtime event: ${e.message}")
+                        fetchInvoice()
+                    }
+                }
+            }
+
+            channel.subscribe()
+            fetchInvoice()
+        }
+
+        awaitClose {
+            job.cancel()
+            runBlocking {
+                try {
+                    activeChannel?.unsubscribe()
+                } catch (e: Exception) { }
+            }
+        }
+    }
+
     override suspend fun getPaymentForInvoice(invoiceId: String): Result<PaymentDto?> {
         return try {
             if (!ensureAuthSession()) return Result.failure(Exception("AUTH_FAILED"))

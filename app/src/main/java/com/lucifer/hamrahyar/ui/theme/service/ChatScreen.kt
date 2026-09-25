@@ -40,8 +40,12 @@ import com.lucifer.hamrahyar.ui.theme.Vazir
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.lucifer.hamrahyar.ui.theme.data.model.FormRequestDto
 import com.lucifer.hamrahyar.ui.theme.data.model.FormResponseDto
+import com.lucifer.hamrahyar.ui.theme.data.model.InvoiceDto
+import com.lucifer.hamrahyar.ui.theme.data.model.InvoiceItemDto
+import com.lucifer.hamrahyar.ui.theme.data.model.PaymentDto
 import com.lucifer.hamrahyar.ui.theme.domain.model.*
 import com.lucifer.hamrahyar.ui.theme.domain.repository.OnlineServiceRepository
+import com.lucifer.hamrahyar.ui.theme.utils.PersianDateUtil
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -61,15 +65,17 @@ fun ChatScreen(
     
     val conversationId = request.conversationId ?: ""
     val profileId = request.profileId ?: ""
+    val orderId = request.id
     
     val chatViewModel: ChatViewModel = viewModel(
         key = "chat_$conversationId",
-        factory = ChatViewModelFactory(repository, conversationId, profileId)
+        factory = ChatViewModelFactory(repository, conversationId, profileId, orderId)
     )
     
     val uiState by chatViewModel.uiState.collectAsState()
     
     var showCancelDialog by remember { mutableStateOf(false) }
+    var showPaymentDialog by remember { mutableStateOf(false) }
     
     val isClosed = request.status == ServiceStatus.CLOSED || request.status == ServiceStatus.ARCHIVED || request.status == ServiceStatus.CANCELLED || request.status == ServiceStatus.REJECTED
     val isSubmitted = request.status == ServiceStatus.SUBMITTED
@@ -159,6 +165,34 @@ fun ChatScreen(
                 )
             }
 
+            if (showPaymentDialog && uiState.invoice != null) {
+                CardToCardPaymentDialog(
+                    invoice = uiState.invoice!!,
+                    defaultPayerName = request.customerFullName ?: "",
+                    onDismiss = { showPaymentDialog = false },
+                    onSubmit = { payerName, bankName, cardLast4, trackingCode ->
+                        val invoice = uiState.invoice!!
+                        val amount = if (invoice.totalAmount > 0) invoice.totalAmount else invoice.amount
+                        chatViewModel.submitCardToCardPayment(
+                            invoiceId = invoice.id,
+                            amount = amount,
+                            payerFullName = payerName,
+                            payerBank = bankName,
+                            payerCardLast4 = cardLast4,
+                            paymentTrackingCode = trackingCode,
+                            receiptPath = null
+                        ) { result ->
+                            result.onSuccess {
+                                Toast.makeText(context, "اطلاعات پرداخت با موفقیت ثبت شد", Toast.LENGTH_SHORT).show()
+                                showPaymentDialog = false
+                            }.onFailure { error ->
+                                Toast.makeText(context, error.message ?: "خطا در ثبت پرداخت", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    }
+                )
+            }
+
             LazyColumn(
                 modifier = Modifier
                     .padding(padding)
@@ -167,7 +201,21 @@ fun ChatScreen(
             ) {
                 item {
                     OrderDetailsSummaryCard(request = request)
-                    Spacer(modifier = Modifier.height(24.dp))
+                    Spacer(modifier = Modifier.height(16.dp))
+                }
+
+                if (uiState.invoice != null) {
+                    item {
+                        InvoiceCard(
+                            invoice = uiState.invoice!!,
+                            payment = uiState.payment,
+                            onPayClick = { showPaymentDialog = true }
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                    }
+                }
+
+                item {
                     Text(
                         "فرم‌های مورد نیاز",
                         fontFamily = Lalezar,
@@ -269,6 +317,425 @@ fun ChatScreen(
             }
         }
     }
+}
+
+@Composable
+fun InvoiceCard(
+    invoice: InvoiceDto,
+    payment: PaymentDto?,
+    onPayClick: () -> Unit
+) {
+    val totalAmount = if (invoice.totalAmount > 0) invoice.totalAmount else invoice.amount
+
+    val formattedAmount = try {
+        val longVal = totalAmount.toLong()
+        java.text.NumberFormat.getNumberInstance(Locale.US).format(longVal)
+            .replace("0", "۰").replace("1", "۱").replace("2", "۲").replace("3", "۳").replace("4", "۴")
+            .replace("5", "۵").replace("6", "۶").replace("7", "۷").replace("8", "۸").replace("9", "۹")
+    } catch (e: Exception) {
+        totalAmount.toString()
+    }
+
+    val issueDateText = PersianDateUtil.parseIsoToPersianText(invoice.createdAt, includeTime = true)
+
+    val invoiceStatusLabel = when (invoice.status.lowercase()) {
+        "paid" -> "پرداخت شده"
+        "waiting_payment", "unpaid", "pending" -> "در انتظار پرداخت"
+        "cancelled" -> "لغو شده"
+        "processing" -> "در حال پردازش"
+        else -> invoice.status
+    }
+
+    val invoiceStatusColor = when (invoice.status.lowercase()) {
+        "paid" -> Color(0xFF00B894)
+        "waiting_payment", "unpaid", "pending" -> Color(0xFFE17055)
+        "cancelled" -> Color(0xFFD63031)
+        else -> Color(0xFF0984E3)
+    }
+
+    val paymentStatusLabel = when (payment?.status?.lowercase()) {
+        "pending", "pending_review" -> "پرداخت در انتظار بررسی"
+        "approved", "success" -> "پرداخت تأیید شده"
+        "rejected", "failed" -> "پرداخت رد شده"
+        else -> null
+    }
+
+    val paymentStatusColor = when (payment?.status?.lowercase()) {
+        "pending", "pending_review" -> Color(0xFFFDCB6E)
+        "approved", "success" -> Color(0xFF00B894)
+        "rejected", "failed" -> Color(0xFFD63031)
+        else -> Color.Gray
+    }
+
+    val canPay = invoice.status.lowercase() in listOf("waiting_payment", "unpaid", "pending") &&
+            payment?.status?.lowercase() !in listOf("pending", "pending_review", "approved", "success")
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 8.dp),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF1B1B3A)),
+        shape = RoundedCornerShape(20.dp),
+        border = BorderStroke(1.dp, Color(0xFF00CEC9).copy(alpha = 0.4f))
+    ) {
+        Column(modifier = Modifier.padding(18.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Info, null, tint = Color(0xFF00CEC9), modifier = Modifier.size(20.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("فاکتور سفارش", fontFamily = Lalezar, fontSize = 17.sp, color = Color.White)
+                }
+
+                if (!invoice.invoiceNumber.isNullOrBlank()) {
+                    Surface(
+                        color = Color(0xFF00CEC9).copy(alpha = 0.15f),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Text(
+                            text = invoice.invoiceNumber,
+                            fontFamily = Vazir,
+                            fontSize = 11.sp,
+                            color = Color(0xFF00CEC9),
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                        )
+                    }
+                }
+            }
+
+            HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp), color = Color.White.copy(alpha = 0.1f))
+
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (issueDateText.isNotBlank()) {
+                    SummaryRow("تاریخ صدور", issueDateText)
+                }
+
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("وضعیت فاکتور", color = Color.White.copy(alpha = 0.6f), fontFamily = Vazir, fontSize = 12.sp)
+                    Surface(
+                        color = invoiceStatusColor.copy(alpha = 0.15f),
+                        shape = RoundedCornerShape(6.dp),
+                        border = BorderStroke(0.5.dp, invoiceStatusColor.copy(alpha = 0.5f))
+                    ) {
+                        Text(
+                            text = invoiceStatusLabel,
+                            color = invoiceStatusColor,
+                            fontFamily = Vazir,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                        )
+                    }
+                }
+
+                if (paymentStatusLabel != null) {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("وضعیت پرداخت", color = Color.White.copy(alpha = 0.6f), fontFamily = Vazir, fontSize = 12.sp)
+                        Surface(
+                            color = paymentStatusColor.copy(alpha = 0.15f),
+                            shape = RoundedCornerShape(6.dp),
+                            border = BorderStroke(0.5.dp, paymentStatusColor.copy(alpha = 0.5f))
+                        ) {
+                            Text(
+                                text = paymentStatusLabel,
+                                color = paymentStatusColor,
+                                fontFamily = Vazir,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+                }
+
+                if (payment?.status?.lowercase() in listOf("rejected", "failed") && !payment?.rejectionReason.isNullOrBlank()) {
+                    Surface(
+                        color = Color(0xFFFF7675).copy(alpha = 0.15f),
+                        shape = RoundedCornerShape(10.dp),
+                        border = BorderStroke(0.5.dp, Color(0xFFFF7675).copy(alpha = 0.4f)),
+                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
+                    ) {
+                        Column(modifier = Modifier.padding(10.dp)) {
+                            Text("علت رد پرداخت:", color = Color(0xFFFF7675), fontFamily = Vazir, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            Text(payment.rejectionReason, color = Color.White, fontFamily = Vazir, fontSize = 12.sp)
+                        }
+                    }
+                }
+            }
+
+            if (invoice.items.isNotEmpty()) {
+                HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp), color = Color.White.copy(alpha = 0.1f))
+                Text("آیتم‌های فاکتور", fontFamily = Lalezar, fontSize = 14.sp, color = Color(0xFFa29bfe))
+                Spacer(modifier = Modifier.height(6.dp))
+
+                invoice.items.forEach { item ->
+                    val itemAmtFormatted = try {
+                        val longVal = item.amount.toLong()
+                        java.text.NumberFormat.getNumberInstance(Locale.US).format(longVal)
+                            .replace("0", "۰").replace("1", "۱").replace("2", "۲").replace("3", "۳").replace("4", "۴")
+                            .replace("5", "۵").replace("6", "۶").replace("7", "۷").replace("8", "۸").replace("9", "۹")
+                    } catch (e: Exception) {
+                        item.amount.toString()
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(item.title, color = Color.White.copy(alpha = 0.9f), fontFamily = Vazir, fontSize = 12.sp)
+                            if (!item.description.isNullOrBlank()) {
+                                Text(item.description, color = Color.White.copy(alpha = 0.5f), fontFamily = Vazir, fontSize = 10.sp)
+                            }
+                        }
+                        Text("$itemAmtFormatted تومان", color = Color.White, fontFamily = Vazir, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+
+            val hasCardInfo = !invoice.bankName.isNullOrBlank() || !invoice.cardNumber.isNullOrBlank() || !invoice.accountOwner.isNullOrBlank() || !invoice.accountTitle.isNullOrBlank()
+            if (hasCardInfo) {
+                HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp), color = Color.White.copy(alpha = 0.1f))
+                Surface(
+                    color = Color.White.copy(alpha = 0.04f),
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(0.5.dp, Color.White.copy(alpha = 0.12f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("اطلاعات حساب مقصد جهت واریز", fontFamily = Lalezar, fontSize = 13.sp, color = Color(0xFFFDCB6E))
+                        if (!invoice.bankName.isNullOrBlank()) {
+                            SummaryRow("بانک", invoice.bankName)
+                        }
+                        val owner = invoice.accountOwner ?: invoice.accountTitle
+                        if (!owner.isNullOrBlank()) {
+                            SummaryRow("صاحب حساب", owner)
+                        }
+                        if (!invoice.cardNumber.isNullOrBlank()) {
+                            SummaryRow("شماره کارت", invoice.cardNumber)
+                        }
+                    }
+                }
+            }
+
+            HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp), color = Color.White.copy(alpha = 0.1f))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("مبلغ نهایی فاکتور", fontFamily = Lalezar, fontSize = 15.sp, color = Color.White)
+                Text(
+                    text = "$formattedAmount تومان",
+                    fontFamily = Lalezar,
+                    fontSize = 18.sp,
+                    color = Color(0xFF00CEC9),
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            if (canPay) {
+                Spacer(modifier = Modifier.height(14.dp))
+                Button(
+                    onClick = onPayClick,
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00CEC9)),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth().height(46.dp)
+                ) {
+                    Text("پرداخت کارت به کارت", fontFamily = Lalezar, fontSize = 15.sp, color = Color(0xFF0F0C29))
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun CardToCardPaymentDialog(
+    invoice: InvoiceDto,
+    defaultPayerName: String,
+    onDismiss: () -> Unit,
+    onSubmit: (payerName: String, bankName: String, cardLast4: String, trackingCode: String) -> Unit
+) {
+    var payerName by remember { mutableStateOf(defaultPayerName) }
+    var bankName by remember { mutableStateOf("") }
+    var cardLast4 by remember { mutableStateOf("") }
+    var trackingCode by remember { mutableStateOf("") }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+    var isSubmitting by remember { mutableStateOf(false) }
+
+    val totalAmount = if (invoice.totalAmount > 0) invoice.totalAmount else invoice.amount
+    val formattedAmount = try {
+        val longVal = totalAmount.toLong()
+        java.text.NumberFormat.getNumberInstance(Locale.US).format(longVal)
+            .replace("0", "۰").replace("1", "۱").replace("2", "۲").replace("3", "۳").replace("4", "۴")
+            .replace("5", "۵").replace("6", "۶").replace("7", "۷").replace("8", "۸").replace("9", "۹")
+    } catch (e: Exception) {
+        totalAmount.toString()
+    }
+
+    AlertDialog(
+        onDismissRequest = { if (!isSubmitting) onDismiss() },
+        containerColor = Color(0xFF1B1B2F),
+        titleContentColor = Color.White,
+        textContentColor = Color.White,
+        title = { Text("ثبت پرداخت کارت به کارت", fontFamily = Lalezar, fontSize = 18.sp) },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                if (!invoice.cardNumber.isNullOrBlank() || !invoice.bankName.isNullOrBlank()) {
+                    Surface(
+                        color = Color.White.copy(alpha = 0.05f),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text("مقصد واریز:", fontFamily = Lalezar, fontSize = 12.sp, color = Color(0xFFFDCB6E))
+                            if (!invoice.bankName.isNullOrBlank()) {
+                                Text("بانک: ${invoice.bankName}", fontFamily = Vazir, fontSize = 11.sp, color = Color.White)
+                            }
+                            val owner = invoice.accountOwner ?: invoice.accountTitle
+                            if (!owner.isNullOrBlank()) {
+                                Text("به نام: $owner", fontFamily = Vazir, fontSize = 11.sp, color = Color.White)
+                            }
+                            if (!invoice.cardNumber.isNullOrBlank()) {
+                                Text("شماره کارت: ${invoice.cardNumber}", fontFamily = Vazir, fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+
+                Text(
+                    text = "مبلغ قابل پرداخت: $formattedAmount تومان",
+                    fontFamily = Vazir,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFF00CEC9)
+                )
+
+                OutlinedTextField(
+                    value = payerName,
+                    onValueChange = { payerName = it },
+                    label = { Text("نام و نام خانوادگی واریزکننده", fontFamily = Vazir, fontSize = 12.sp) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = Color(0xFF00CEC9),
+                        unfocusedBorderColor = Color.White.copy(alpha = 0.3f),
+                        focusedLabelColor = Color(0xFF00CEC9),
+                        unfocusedLabelColor = Color.White.copy(alpha = 0.6f),
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White
+                    )
+                )
+
+                OutlinedTextField(
+                    value = bankName,
+                    onValueChange = { bankName = it },
+                    label = { Text("نام بانک واریزکننده (مثلا: ملی، سامان)", fontFamily = Vazir, fontSize = 12.sp) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = Color(0xFF00CEC9),
+                        unfocusedBorderColor = Color.White.copy(alpha = 0.3f),
+                        focusedLabelColor = Color(0xFF00CEC9),
+                        unfocusedLabelColor = Color.White.copy(alpha = 0.6f),
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White
+                    )
+                )
+
+                OutlinedTextField(
+                    value = cardLast4,
+                    onValueChange = { if (it.length <= 4) cardLast4 = it },
+                    label = { Text("۴ رقم آخر کارت واریزکننده", fontFamily = Vazir, fontSize = 12.sp) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = Color(0xFF00CEC9),
+                        unfocusedBorderColor = Color.White.copy(alpha = 0.3f),
+                        focusedLabelColor = Color(0xFF00CEC9),
+                        unfocusedLabelColor = Color.White.copy(alpha = 0.6f),
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White
+                    )
+                )
+
+                OutlinedTextField(
+                    value = trackingCode,
+                    onValueChange = { trackingCode = it },
+                    label = { Text("شماره پیگیری / کد ارجاع", fontFamily = Vazir, fontSize = 12.sp) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = Color(0xFF00CEC9),
+                        unfocusedBorderColor = Color.White.copy(alpha = 0.3f),
+                        focusedLabelColor = Color(0xFF00CEC9),
+                        unfocusedLabelColor = Color.White.copy(alpha = 0.6f),
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White
+                    )
+                )
+
+                if (errorMessage != null) {
+                    Text(
+                        text = errorMessage!!,
+                        color = Color(0xFFFF7675),
+                        fontFamily = Vazir,
+                        fontSize = 11.sp
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    if (payerName.isBlank()) {
+                        errorMessage = "لطفاً نام واریزکننده را وارد کنید"
+                        return@Button
+                    }
+                    if (bankName.isBlank()) {
+                        errorMessage = "لطفاً نام بانک واریزکننده را وارد کنید"
+                        return@Button
+                    }
+                    if (cardLast4.length != 4) {
+                        errorMessage = "۴ رقم آخر کارت باید دقیقاً ۴ رقم باشد"
+                        return@Button
+                    }
+                    if (trackingCode.isBlank()) {
+                        errorMessage = "لطفاً کد پیگیری را وارد کنید"
+                        return@Button
+                    }
+                    errorMessage = null
+                    isSubmitting = true
+                    onSubmit(payerName.trim(), bankName.trim(), cardLast4.trim(), trackingCode.trim())
+                },
+                enabled = !isSubmitting,
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00CEC9))
+            ) {
+                if (isSubmitting) {
+                    CircularProgressIndicator(modifier = Modifier.size(16.dp), color = Color.White)
+                } else {
+                    Text("ثبت و ارسال پرداخت", fontFamily = Vazir, color = Color(0xFF0F0C29), fontWeight = FontWeight.Bold)
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = onDismiss,
+                enabled = !isSubmitting
+            ) {
+                Text("انصراف", color = Color.White, fontFamily = Vazir)
+            }
+        }
+    )
 }
 
 @Composable

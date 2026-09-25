@@ -99,6 +99,8 @@ interface OnlineServiceRepository {
 
     suspend fun getInvoiceForOrder(orderId: String): Result<InvoiceDto?>
 
+    fun observeInvoiceForOrder(orderId: String): Flow<InvoiceDto?>
+
     suspend fun getPaymentForInvoice(invoiceId: String): Result<PaymentDto?>
 
     suspend fun submitCardToCardPayment(

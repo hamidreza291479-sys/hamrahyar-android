@@ -1,10 +1,13 @@
 package com.lucifer.hamrahyar.ui.theme.service
 
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.lucifer.hamrahyar.ui.theme.data.model.FormRequestDto
 import com.lucifer.hamrahyar.ui.theme.data.model.FormResponseDto
+import com.lucifer.hamrahyar.ui.theme.data.model.InvoiceDto
+import com.lucifer.hamrahyar.ui.theme.data.model.PaymentDto
 import com.lucifer.hamrahyar.ui.theme.domain.model.ChatMessage
 import com.lucifer.hamrahyar.ui.theme.domain.repository.OnlineServiceRepository
 import kotlinx.coroutines.flow.*
@@ -14,6 +17,8 @@ data class ChatUiState(
     val messages: List<ChatMessage> = emptyList(),
     val formRequests: List<FormRequestDto> = emptyList(),
     val formResponses: List<FormResponseDto> = emptyList(),
+    val invoice: InvoiceDto? = null,
+    val payment: PaymentDto? = null,
     val isLoading: Boolean = false,
     val realtimeStatus: String = "DISCONNECTED",
     val error: String? = null
@@ -22,7 +27,8 @@ data class ChatUiState(
 class ChatViewModel(
     private val repository: OnlineServiceRepository,
     private val conversationId: String,
-    private val profileId: String
+    private val profileId: String,
+    private val orderId: String = ""
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(ChatUiState(isLoading = true))
@@ -74,6 +80,20 @@ class ChatViewModel(
                     _uiState.update { it.copy(error = e.message) }
                 }
                 .launchIn(this)
+
+            if (orderId.isNotBlank()) {
+                repository.observeInvoiceForOrder(orderId)
+                    .onEach { invoice ->
+                        val payment = if (invoice != null) {
+                            repository.getPaymentForInvoice(invoice.id).getOrNull()
+                        } else null
+                        _uiState.update { it.copy(invoice = invoice, payment = payment) }
+                    }
+                    .catch { e ->
+                        Log.e("ChatViewModel", "Error observing invoice for order $orderId: ${e.message}")
+                    }
+                    .launchIn(this)
+            }
         }
     }
     
@@ -83,15 +103,55 @@ class ChatViewModel(
             onResult(result)
         }
     }
+
+    fun submitCardToCardPayment(
+        invoiceId: String,
+        amount: Double,
+        payerFullName: String,
+        payerBank: String,
+        payerCardLast4: String,
+        paymentTrackingCode: String,
+        receiptPath: String?,
+        onResult: (Result<Unit>) -> Unit
+    ) {
+        viewModelScope.launch {
+            val result = repository.submitCardToCardPayment(
+                invoiceId = invoiceId,
+                amount = amount,
+                payerFullName = payerFullName,
+                payerBank = payerBank,
+                payerCardLast4 = payerCardLast4,
+                paymentTrackingCode = paymentTrackingCode,
+                receiptPath = receiptPath
+            )
+            if (result.isSuccess) {
+                refreshInvoiceAndPayment()
+            }
+            onResult(result)
+        }
+    }
+
+    fun refreshInvoiceAndPayment() {
+        if (orderId.isBlank()) return
+        viewModelScope.launch {
+            repository.getInvoiceForOrder(orderId).onSuccess { invoice ->
+                val payment = if (invoice != null) {
+                    repository.getPaymentForInvoice(invoice.id).getOrNull()
+                } else null
+                _uiState.update { it.copy(invoice = invoice, payment = payment) }
+            }
+        }
+    }
 }
 
 class ChatViewModelFactory(
     private val repository: OnlineServiceRepository,
     private val conversationId: String,
-    private val profileId: String
+    private val profileId: String,
+    private val orderId: String = ""
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
-        return ChatViewModel(repository, conversationId, profileId) as T
+        return ChatViewModel(repository, conversationId, profileId, orderId) as T
     }
 }
