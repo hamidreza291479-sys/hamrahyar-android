@@ -13,9 +13,11 @@ import io.github.jan.supabase.functions.Functions
 import io.github.jan.supabase.realtime.Realtime
 import io.github.jan.supabase.storage.Storage
 import io.ktor.client.engine.okhttp.OkHttp
+import io.ktor.client.plugins.HttpTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.encodeToString
 import java.util.concurrent.TimeUnit
+import kotlin.time.Duration.Companion.seconds
 
 /**
  * Central Supabase Client for the Hamrahyar application.
@@ -43,11 +45,12 @@ object SupabaseClient {
             supabaseUrl = BuildConfig.SUPABASE_URL,
             supabaseKey = BuildConfig.SUPABASE_ANON_KEY
         ) {
+            requestTimeout = 60.seconds
             httpEngine = OkHttp.create {
                 config {
-                    connectTimeout(30, TimeUnit.SECONDS)
-                    readTimeout(30, TimeUnit.SECONDS)
-                    writeTimeout(30, TimeUnit.SECONDS)
+                    connectTimeout(60, TimeUnit.SECONDS)
+                    readTimeout(60, TimeUnit.SECONDS)
+                    writeTimeout(60, TimeUnit.SECONDS)
                 }
             }
             
@@ -90,10 +93,10 @@ class PreferenceSessionManager(context: Context) : SessionManager {
             // Mark as initialized once we have a valid session
             if (session.accessToken.isNotBlank()) {
                 hasInitializedAuth = true
-                Log.d(TAG, "Session saved. Marker set: hasInitializedAuth=true")
+                Log.d(TAG, "Session saved.")
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to save session", e)
+            Log.e(TAG, "Failed to save session")
         }
     }
 
@@ -105,10 +108,10 @@ class PreferenceSessionManager(context: Context) : SessionManager {
         }
         return try {
             val session = json.decodeFromString<UserSession>(sessionStr)
-            Log.d(TAG, "Session loaded successfully")
+            Log.d(TAG, "Session loaded")
             session
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to load session from storage", e)
+            Log.e(TAG, "Failed to load session")
             null
         }
     }

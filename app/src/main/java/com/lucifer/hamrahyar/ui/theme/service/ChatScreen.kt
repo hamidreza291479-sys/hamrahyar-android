@@ -37,6 +37,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lucifer.hamrahyar.ui.theme.Lalezar
 import com.lucifer.hamrahyar.ui.theme.Vazir
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.lucifer.hamrahyar.ui.theme.data.model.FormRequestDto
 import com.lucifer.hamrahyar.ui.theme.data.model.FormResponseDto
 import com.lucifer.hamrahyar.ui.theme.domain.model.*
@@ -56,38 +57,22 @@ fun ChatScreen(
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
-    var messages by remember { mutableStateOf<List<ChatMessage>>(emptyList()) }
-    var realtimeStatus by remember { mutableStateOf("CONNECTED") }
-    var showCancelDialog by remember { mutableStateOf(false) }
-    var showOrderDetails by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
-    var formRequests by remember { mutableStateOf<List<FormRequestDto>>(emptyList()) }
-    var formResponses by remember { mutableStateOf<List<FormResponseDto>>(emptyList()) }
     
-    LaunchedEffect(Unit) {
-        repository.observeRealtimeStatus().collectLatest { realtimeStatus = it }
-    }
+    val conversationId = request.conversationId ?: ""
+    val profileId = request.profileId ?: ""
+    
+    val chatViewModel: ChatViewModel = viewModel(
+        key = "chat_$conversationId",
+        factory = ChatViewModelFactory(repository, conversationId, profileId)
+    )
+    
+    val uiState by chatViewModel.uiState.collectAsState()
+    
+    var showCancelDialog by remember { mutableStateOf(false) }
     
     val isClosed = request.status == ServiceStatus.CLOSED || request.status == ServiceStatus.ARCHIVED || request.status == ServiceStatus.CANCELLED || request.status == ServiceStatus.REJECTED
     val isSubmitted = request.status == ServiceStatus.SUBMITTED
-    var conversationId by remember { mutableStateOf(request.conversationId ?: "") }
-
-    LaunchedEffect(request.conversationId) {
-        request.conversationId?.let { conversationId = it }
-    }
-
-    LaunchedEffect(conversationId) {
-        if (conversationId.isNotEmpty()) {
-            launch { repository.observeFormRequests(conversationId).collectLatest { formRequests = it } }
-            launch { repository.observeFormResponses(conversationId).collectLatest { formResponses = it } }
-        }
-    }
-
-    LaunchedEffect(conversationId, request.profileId) {
-        if (conversationId.isNotEmpty() && request.profileId != null) {
-            repository.getMessages(conversationId, request.profileId).collectLatest { messages = it }
-        }
-    }
 
     Box(
         modifier = Modifier
@@ -131,7 +116,7 @@ fun ChatScreen(
                     )
                     
                     AnimatedVisibility(
-                        visible = realtimeStatus != "CONNECTED",
+                        visible = uiState.realtimeStatus != "CONNECTED",
                         enter = fadeIn(),
                         exit = fadeOut()
                     ) {
@@ -192,49 +177,53 @@ fun ChatScreen(
                     )
                 }
                 
-                if (formRequests.isEmpty()) {
+                if (uiState.isLoading && uiState.formRequests.isEmpty()) {
                     item {
                         Box(
                             modifier = Modifier.fillMaxWidth().padding(32.dp),
                             contentAlignment = Alignment.Center
                         ) {
-                            if (isSubmitted) {
-                                Text(
-                                    "کارشناسان فرم‌های مربوط را برای شما ارسال می‌کنند.",
-                                    color = Color.White.copy(alpha = 0.5f),
-                                    fontFamily = Vazir,
-                                    fontSize = 14.sp,
-                                    textAlign = TextAlign.Center
-                                )
-                            } else {
-                                CircularProgressIndicator(color = Color(0xFFa29bfe))
-                            }
+                            CircularProgressIndicator(color = Color(0xFFa29bfe))
+                        }
+                    }
+                } else if (uiState.formRequests.isEmpty()) {
+                    item {
+                        Box(
+                            modifier = Modifier.fillMaxWidth().padding(32.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                "کارشناسان فرم‌های مربوط را برای شما ارسال می‌کنند.",
+                                color = Color.White.copy(alpha = 0.5f),
+                                fontFamily = Vazir,
+                                fontSize = 14.sp,
+                                textAlign = TextAlign.Center
+                            )
                         }
                     }
                 }
 
-                items(formRequests, key = { "form_${it.id}" }) { form ->
-                    val response = formResponses.find { it.requestId == form.id }
+                items(uiState.formRequests, key = { "form_${it.id}" }) { form ->
+                    val response = uiState.formResponses.find { it.requestId == form.id }
                     FormRequestCard(
                         request = form, 
                         response = response,
                         repository = repository,
                         orderId = request.id,
-                        onSubmit = { data ->
-                            scope.launch {
-                                repository.submitFormResponse(form.id, request.id, data)
-                                    .onSuccess {
-                                        Toast.makeText(context, "فرم با موفقیت ارسال شد", Toast.LENGTH_SHORT).show()
-                                    }
-                                    .onFailure {
-                                        Toast.makeText(context, "خطا در ارسال فرم", Toast.LENGTH_SHORT).show()
-                                    }
+                        onSubmit = { data, onResult ->
+                            chatViewModel.submitForm(form.id, request.id, data) { result ->
+                                result.onSuccess {
+                                    Toast.makeText(context, "فرم با موفقیت ارسال شد", Toast.LENGTH_SHORT).show()
+                                }.onFailure { error ->
+                                    Toast.makeText(context, error.message ?: "خطا در ارسال فرم", Toast.LENGTH_SHORT).show()
+                                }
+                                onResult(result)
                             }
                         }
                     )
                 }
                 
-                val notices = messages.filter { it.senderRole == "ADMIN" && it.type == "text" }
+                val notices = uiState.messages.filter { it.senderRole == "ADMIN" && it.type == "text" }
                 if (notices.isNotEmpty()) {
                     item {
                         Spacer(modifier = Modifier.height(24.dp))

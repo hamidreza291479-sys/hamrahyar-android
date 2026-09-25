@@ -4,6 +4,8 @@ import com.lucifer.hamrahyar.ui.home.model.ServiceCategory
 import com.lucifer.hamrahyar.ui.home.model.ServiceItem
 import com.lucifer.hamrahyar.ui.theme.data.model.FormRequestDto
 import com.lucifer.hamrahyar.ui.theme.data.model.FormResponseDto
+import com.lucifer.hamrahyar.ui.theme.data.model.InvoiceDto
+import com.lucifer.hamrahyar.ui.theme.data.model.PaymentDto
 import com.lucifer.hamrahyar.ui.theme.domain.model.*
 import kotlinx.coroutines.flow.Flow
 
@@ -94,6 +96,20 @@ interface OnlineServiceRepository {
     suspend fun clearPresence(clientId: String): Result<Unit>
 
     suspend fun getAdminUserPresence(): Result<List<AdminUserPresence>>
+
+    suspend fun getInvoiceForOrder(orderId: String): Result<InvoiceDto?>
+
+    suspend fun getPaymentForInvoice(invoiceId: String): Result<PaymentDto?>
+
+    suspend fun submitCardToCardPayment(
+        invoiceId: String,
+        amount: Double,
+        payerFullName: String,
+        payerBank: String,
+        payerCardLast4: String,
+        paymentTrackingCode: String,
+        receiptPath: String?
+    ): Result<Unit>
     
     // Legacy support (optional, can be phased out)
     suspend fun getPriorityConfiguration(): List<PriorityConfig>

@@ -70,18 +70,6 @@ fun HomeScreen(
 
     var searchQuery by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
-    
-    // Double back to exit logic
-    var backPressedTime by remember { mutableLongStateOf(0L) }
-    BackHandler {
-        val now = System.currentTimeMillis()
-        if (now - backPressedTime < 2000) {
-            onExit()
-        } else {
-            backPressedTime = now
-            Toast.makeText(context, "برای خروج دوباره دکمه برگشت را بزنید", Toast.LENGTH_SHORT).show()
-        }
-    }
 
     val filteredCategories = remember(searchQuery, categories) {
         if (searchQuery.isBlank()) categories

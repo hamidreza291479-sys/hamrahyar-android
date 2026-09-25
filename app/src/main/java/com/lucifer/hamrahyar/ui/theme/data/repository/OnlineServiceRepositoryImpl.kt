@@ -53,6 +53,10 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
     private var lastCacheTime: Long = 0
     private val CACHE_TTL = 10 * 60 * 1000 // 10 minutes
 
+    private val presenceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val isPresenceJobRunning = java.util.concurrent.atomic.AtomicBoolean(false)
+    private var lastPresenceTouchTime = 0L
+
     private suspend fun getOrCreateGuestKey(): String {
         val existing = preferenceManager.guestKey.first()
         if (!existing.isNullOrBlank()) return existing
@@ -69,24 +73,53 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
                 // 1. Wait for Auth initialization (restoration from PreferenceSessionManager)
                 client.auth.sessionStatus.first { it !is SessionStatus.Initializing }
                 
-                val session = client.auth.currentSessionOrNull()
-                val isExpired = session?.expiresAt?.let { it < kotlinx.datetime.Clock.System.now() } ?: true
-                
+                var session = client.auth.currentSessionOrNull()
                 if (session != null) {
+                    val isExpired = session.expiresAt < kotlinx.datetime.Clock.System.now()
                     if (isExpired) {
                         Log.d(TAG, "Auth: Session expired, attempting refresh...")
                         try {
                             client.auth.refreshCurrentSession()
                             Log.d(TAG, "Auth: Session refreshed successfully.")
-                            return@withLock true
+                            session = client.auth.currentSessionOrNull()
                         } catch (e: Exception) {
                             Log.e(TAG, "Auth: Session refresh failed: ${e.message}")
                             // DO NOT call signInAnonymously() here if we already have a user, 
                             // as it would create a NEW user and break ownership logic.
+                            val currentSession = client.auth.currentSessionOrNull() ?: session
+                            if (currentSession?.accessToken?.isNotBlank() == true) {
+                                Log.w(TAG, "Auth: Continuing with existing session despite refresh error.")
+                                return@withLock true
+                            }
                             return@withLock false 
                         }
                     }
-                    return@withLock true // Session is valid
+
+                    // Promote user if anonymous but profile data is present locally
+                    if (session != null) {
+                        val isAnonUser = session.user?.email == null && session.user?.phone == null
+                        if (isAnonUser) {
+                            val localPhone = preferenceManager.customerMobile.first() ?: ""
+                            val localEmail = preferenceManager.customerEmail.first() ?: ""
+                            val localName = preferenceManager.customerName.first() ?: ""
+                            if (localPhone.isNotBlank() || localEmail.isNotBlank()) {
+                                Log.d(TAG, "Auth: Promoting anonymous user with local info...")
+                                try {
+                                    client.auth.updateUser {
+                                        if (localPhone.isNotBlank()) phone = localPhone
+                                        if (localEmail.isNotBlank()) email = localEmail
+                                        data = buildJsonObject {
+                                            put("full_name", localName)
+                                        }
+                                    }
+                                    Log.d(TAG, "Auth: Anonymous user successfully promoted.")
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "Auth: Failed to promote anonymous user: ${e.message}")
+                                }
+                            }
+                        }
+                    }
+                    return@withLock client.auth.currentSessionOrNull() != null
                 }
                 
                 // 2. No session found
@@ -102,7 +135,7 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
                 return@withLock newSession != null
                 
             } catch (e: Exception) {
-                Log.e(TAG, "Auth: critical failure", e)
+                Log.e(TAG, "Auth: critical failure")
                 return@withLock false
             }
         }
@@ -120,9 +153,23 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
     private suspend fun refreshCategories(): List<ServiceCategory> = coroutineScope {
         val startTime = System.currentTimeMillis()
         try {
-            ensureAuthSession()
+            val authOk = ensureAuthSession()
+            Log.d(TAG, "refreshCategories: authOk=$authOk")
+
             val servicesDeferred = async {
-                client.postgrest.rpc("get_active_services_fast", buildJsonObject {}).decodeAs<List<ActiveServiceDto>>()
+                try {
+                    client.postgrest.rpc("get_active_services_fast", buildJsonObject {}).decodeAs<List<ActiveServiceDto>>()
+                } catch (e: Exception) {
+                    Log.e(TAG, "RPC get_active_services_fast failed. Falling back to table fetch.")
+                    try {
+                        client.from("services").select {
+                            filter { eq("is_active", true) }
+                        }.decodeAs<List<ActiveServiceDto>>()
+                    } catch (e2: Exception) {
+                        Log.e(TAG, "Table fetch also failed.")
+                        emptyList<ActiveServiceDto>()
+                    }
+                }
             }
             
             val categoriesDeferred = async {
@@ -132,10 +179,30 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
                 }.decodeAs<List<CategoryDto>>()
             }
 
-            val services = try { servicesDeferred.await() } catch (e: Exception) { emptyList() }
-            val categories = try { categoriesDeferred.await() } catch (e: Exception) { emptyList() }
+            val services = try { 
+                servicesDeferred.await() 
+            } catch (e: Exception) { 
+                Log.e(TAG, "Services fetch failed")
+                emptyList() 
+            }
+            
+            val categories = try { 
+                categoriesDeferred.await() 
+            } catch (e: Exception) { 
+                Log.e(TAG, "Categories fetch failed")
+                emptyList() 
+            }
 
-            if (services.isEmpty() && categories.isEmpty()) return@coroutineScope cachedCategories ?: emptyList()
+            Log.d(TAG, "Fetched ${categories.size} categories and ${services.size} services in ${System.currentTimeMillis() - startTime}ms")
+
+            if (categories.isEmpty()) {
+                Log.w(TAG, "Categories fetch returned empty. Trying to use cache.")
+                return@coroutineScope cachedCategories ?: throw Exception("خطا در دریافت لیست خدمات. لطفا اتصال خود را بررسی کنید.")
+            }
+            
+            if (services.isEmpty()) {
+                Log.w(TAG, "Services fetch returned empty.")
+            }
 
             services.forEach { cachedServices[it.id] = it }
 
@@ -258,7 +325,7 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
             logOp("create_order", clientRequestId, serviceId, System.currentTimeMillis() - startTime, "SUCCESS")
             Result.success(active)
         } catch (e: Exception) {
-            Log.e(TAG, "Order creation failed: ${e.message}")
+            Log.e(TAG, "Order creation failed")
             Result.failure(e)
         }
     }
@@ -286,7 +353,7 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
                 if (orderDto.conversationId != null) {
                     Log.d(TAG, "OrderRepository: conversation_id received from server")
                 }
-                Log.d(TAG, "OrderRepository: orderId=$orderId, conversationId=$conversationId")
+                Log.d(TAG, "OrderRepository: orderId=$orderId")
                 
                 val active = ActiveService(
                     accessId = orderId, orderId = orderId,
@@ -314,7 +381,7 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
                 Result.success(null)
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to get active order summary: ${e.message}")
+            Log.e(TAG, "Failed to get active order summary")
             Result.failure(e)
         }
     }
@@ -372,16 +439,14 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
                     order("created_at", Order.ASCENDING)
                 }.decodeAs<List<MessageDto>>()
                 
-                // Merge and avoid duplicates
                 val newMessages = messages.map { it.toDomain(profileId) }
+                // Use a more thorough equality check or just always update if fetched manually
                 val merged = (currentList + newMessages).distinctBy { it.id }.sortedBy { it.timestamp }
                 
-                if (merged.size != currentList.size) {
-                    currentList = merged
-                    trySend(currentList)
-                }
+                currentList = merged
+                trySend(currentList)
             } catch (e: Exception) {
-                Log.e(TAG, "Error fetching messages for $conversationId: ${e.message}")
+                Log.e(TAG, "Error fetching messages")
             }
         }
 
@@ -418,7 +483,7 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
                         else -> {}
                     }
                 } catch (e: Exception) { 
-                    Log.e(TAG, "Error processing realtime message: ${e.message}")
+                    Log.e(TAG, "Error processing realtime message")
                 }
             }
         }
@@ -468,7 +533,7 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
                     }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Error in resyncAndSend: ${e.message}")
+                Log.e(TAG, "Error in resyncAndSend")
             }
         }
 
@@ -497,7 +562,7 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
                         }
                         is PostgresAction.Delete -> {
                             val deletedId = action.oldRecord["id"]?.jsonPrimitive?.content
-                            Log.d(TAG, "Order Realtime DELETE detected: orderId=$deletedId")
+                            Log.d(TAG, "Order Realtime DELETE detected")
                             // We need to notify that this specific order is gone
                             // For simplicity, we trigger a resync which will return null if no order is active
                             resyncAndSend()
@@ -505,7 +570,7 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
                         else -> {}
                     }
                 } catch (e: Exception) {
-                    Log.e(TAG, "Error processing order event: ${e.message}")
+                    Log.e(TAG, "Error processing order event")
                 }
             }
         }
@@ -551,7 +616,7 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
                 delay(retries[attempt])
                 attempt++
             } catch (e: Exception) {
-                Log.e(TAG, "OrderRepository: conversation lookup error for orderId=$orderId: ${e.message}")
+                Log.e(TAG, "OrderRepository: conversation lookup error")
                 if (attempt >= retries.size) return Result.failure(e)
                 delay(retries[attempt])
                 attempt++
@@ -593,14 +658,14 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
                     currentForms = forms
                     trySend(currentForms)
                 } catch (e: Exception) {
-                    Log.e(TAG, "Error fetching forms for $conversationId: ${e.message}")
+                    Log.e(TAG, "Error fetching forms")
                 }
             }
 
             launch {
                 client.realtime.status.collect { status ->
                     if (status == Realtime.Status.CONNECTED) {
-                        Log.d(TAG, "Forms Realtime connected for $conversationId")
+                        Log.d(TAG, "Forms Realtime connected for $conversationId. Resyncing...")
                         fetchForms()
                     }
                 }
@@ -630,7 +695,7 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
                             else -> {}
                         }
                     } catch (e: Exception) {
-                        Log.e(TAG, "Error merging form event: ${e.message}")
+                        Log.e(TAG, "Error merging form event")
                         fetchForms() // Fallback to full fetch on error
                     }
                 }
@@ -688,40 +753,109 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
             
             Result.success(Unit)
         } catch (e: Exception) {
-            val errorMsg = if (e is RestException) {
-                val code = e.error
-                val message = when {
-                    code == "not_allowed" -> "خطای عدم دسترسی (not_allowed). هویت فعلی شما با مالک این فرم مطابقت ندارد."
-                    code == "guest_session_mismatch" -> "خطای عدم تطابق نشست. لطفاً دوباره وارد شوید."
-                    code == "form_not_pending" -> "این فرم قبلاً ارسال شده است."
-                    code == "form_expired" -> "زمان پاسخگویی به این فرم به پایان رسیده است."
-                    code.startsWith("required_field_missing:") -> "تکمیل تمامی فیلدهای الزامی ضروری است."
-                    code.startsWith("invalid_numeric_field:") -> "مقدار عددی وارد شده معتبر نیست."
-                    code == "file_not_found" -> "فایل‌های پیوست یافت نشدند."
-                    code == "file_too_large" -> "حجم فایل بیش از حد مجاز است."
-                    else -> "خطا در ارسال فرم: ${e.message}"
+            val errorStr = e.message ?: ""
+            val code = if (e is RestException) e.error else {
+                when {
+                    errorStr.contains("invalid_vehicle_plate") -> "invalid_vehicle_plate"
+                    errorStr.contains("form_expired") -> "form_expired"
+                    errorStr.contains("invalid_timed_code") -> "invalid_timed_code"
+                    errorStr.contains("file_not_found") -> "file_not_found"
+                    errorStr.contains("file_too_large") -> "file_too_large"
+                    errorStr.contains("form_not_pending") -> "form_not_pending"
+                    else -> ""
                 }
-                Log.e(TAG, "RPC submit_form_response failed ($code): ${e.description}")
-                message
-            } else {
-                Log.e(TAG, "Unexpected error in submitFormResponse", e)
-                "خطای غیرمنتظره در سیستم."
             }
+            
+            val errorMsg = if (code.isNotBlank()) {
+                when (code) {
+                    "not_allowed" -> "خطای عدم دسترسی (not_allowed). هویت فعلی شما با مالک این فرم مطابقت ندارد."
+                    "guest_session_mismatch" -> "خطای عدم تطابق نشست. لطفاً دوباره وارد شوید."
+                    "form_not_pending" -> "این فرم در وضعیت معلق نیست یا قبلاً ثبت شده است."
+                    "form_expired" -> "مهلت این فرم به پایان رسیده است."
+                    "invalid_vehicle_plate" -> "شماره پلاک واردشده معتبر نیست."
+                    "invalid_timed_code" -> "رمز واردشده صحیح نیست."
+                    "file_not_found" -> "فایل‌های پیوست یافت نشدند."
+                    "file_too_large" -> "حجم فایل بیشتر از حد مجاز است."
+                    else -> "خطا در ارسال فرم: $code"
+                }
+            } else if (e is RestException) {
+                val c = e.error
+                when {
+                    c.startsWith("required_field_missing:") -> "تکمیل تمامی فیلدهای الزامی ضروری است."
+                    c.startsWith("invalid_numeric_field:") -> "مقدار عددی وارد شده معتبر نیست."
+                    else -> "خطا در ارسال فرم"
+                }
+            } else {
+                "خطا در ارسال فرم"
+            }
+            Log.e(TAG, "RPC submit_form_response failed: $code")
             Result.failure(Exception(errorMsg))
         }
     }
 
     override suspend fun uploadFile(bucket: String, path: String, data: ByteArray, mimeType: String): Result<String> {
-        return try {
-            if (!ensureAuthSession()) return Result.failure(Exception("AUTH_FAILED"))
-            val bucketApi = client.storage.from(bucket)
-            bucketApi.upload(path, data) {
-                upsert = true
+        val pathParts = path.split("/")
+        val orderId = pathParts.getOrNull(0) ?: "unknown"
+        val formRequestId = pathParts.getOrNull(1) ?: "unknown"
+        val fileName = pathParts.getOrNull(pathParts.size - 1) ?: "unknown"
+        val fileId = fileName.substringBeforeLast(".", fileName)
+        val extension = fileName.substringAfterLast(".", "none")
+
+        try {
+            if (!ensureAuthSession()) {
+                Log.e(TAG, "STORAGE_UPLOAD_PRECHECK_FAILED: unauthenticated")
+                return Result.failure(Exception("unauthenticated"))
             }
-            Result.success(path)
+
+            val session = client.auth.currentSessionOrNull()
+            if (session == null) {
+                Log.e(TAG, "STORAGE_UPLOAD_PRECHECK_FAILED: unauthenticated")
+                return Result.failure(Exception("unauthenticated"))
+            }
+
+            val isAnonymous = session.user?.email == null && session.user?.phone == null
+
+            Log.d(TAG, "STORAGE_UPLOAD_PRECHECK: authenticated=true, userId=${session.user?.id}, anonymous=$isAnonymous, orderId=$orderId, formRequestId=$formRequestId, fileId=$fileId, bucket=$bucket, extension=$extension, mimeType=$mimeType, file_size=${data.size}")
+
+            if (isAnonymous) {
+                return Result.failure(Exception("anonymous_session"))
+            }
+
+            if (data.isEmpty()) {
+                return Result.failure(Exception("invalid_file_type"))
+            }
+
+            val bucketApi = client.storage.from(bucket)
+            
+            bucketApi.upload(path, data) {
+                upsert = false
+            }
+            
+            Log.i(TAG, "STORAGE_UPLOAD_SUCCESS: path=$path")
+            return Result.success(path)
         } catch (e: Exception) {
-            Log.e(TAG, "File upload failed: ${e.message}")
-            Result.failure(e)
+            val isRest = e is RestException
+            val statusCode = if (e is RestException) e.statusCode else 0
+            val errorBody = if (e is RestException) e.error else ""
+            val message = e.message ?: ""
+            
+            Log.e(TAG, "STORAGE_UPLOAD_RAW_ERROR: isRest=$isRest, statusCode=$statusCode, error=$errorBody, message=$message, orderId=$orderId, formRequestId=$formRequestId, fileId=$fileId, bucket=$bucket, extension=$extension, mimeType=$mimeType, size=${data.size}, authenticated=${client.auth.currentSessionOrNull() != null}, anonymous=${client.auth.currentSessionOrNull()?.user?.email == null}, userId=${client.auth.currentSessionOrNull()?.user?.id}, upsert=false, operation=upload")
+
+            val mapped = when {
+                statusCode == 413 || message.contains("413") || message.contains("Payload Too Large") || errorBody.contains("too large") -> "file_too_large"
+                statusCode == 404 || errorBody.contains("404") || message.contains("bucket not found") -> "bucket_not_found"
+                statusCode == 403 || statusCode == 401 || errorBody.contains("403") || errorBody.contains("401") || errorBody.contains("policy") || message.contains("policy") || message.contains("P0001") || errorBody.contains("P0001") -> {
+                    when {
+                        message.contains("form_request") || errorBody.contains("form_request") -> "form_not_pending"
+                        message.contains("order") || errorBody.contains("order") -> "order_not_owned"
+                        else -> "storage_policy_denied"
+                    }
+                }
+                message.contains("path") || message.contains("invalid path") -> "invalid_path"
+                message.contains("network") || message.contains("timeout") || message.contains("Connect") -> "network_error"
+                else -> "upload_failed"
+            }
+            return Result.failure(Exception(mapped))
         }
     }
 
@@ -737,7 +871,7 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
                 return Result.failure(Exception("خطا در احراز هویت. نشست کاربری قبلی بازیابی نشد."))
             }
 
-            Log.d(TAG, "registerFormFile: form_request_id=$formRequestId, file=$originalName")
+            Log.d(TAG, "registerFormFile: form_request_id=$formRequestId")
             
             val response = client.postgrest.rpc("register_form_file", buildJsonObject {
                 put("p_form_request_id", formRequestId)
@@ -751,10 +885,10 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
             Result.success(fileId)
         } catch (e: Exception) {
             val errorMsg = if (e is RestException) {
-                Log.e(TAG, "RPC register_form_file failed (${e.error}): ${e.description}")
+                Log.e(TAG, "FILE_REGISTER_FAILED: ${e.error}")
                 "خطا در ثبت فایل: ${e.message}"
             } else {
-                Log.e(TAG, "Unexpected error in registerFormFile", e)
+                Log.e(TAG, "FILE_REGISTER_FAILED: unknown")
                 "خطای غیرمنتظره در ثبت فایل."
             }
             Result.failure(Exception(errorMsg))
@@ -784,11 +918,11 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
             Result.success(Unit)
         } catch (e: Exception) {
             val errorDetails = if (e is RestException) {
-                "type=RestException, status=${e.statusCode}, error=${e.error}, message=${e.message}"
+                "status=${e.statusCode}, error=${e.error}"
             } else {
-                "type=${e::class.java.simpleName}, message=${e.message}"
+                "type=${e::class.java.simpleName}"
             }
-            Log.e(TAG, "CancelOrder: FAILED, orderId=$orderId, $errorDetails")
+            Log.e(TAG, "CancelOrder: FAILED, $errorDetails")
             // Even if RPC fails, if it's because order is already gone (404), we should clear local
             if (e is RestException && e.statusCode == 404) {
                 clearLocalAccess()
@@ -842,7 +976,7 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
                 result = dto.result
             ))
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to get latest order event: ${e.message}")
+            Log.e(TAG, "Failed to get latest order event")
             Result.failure(e)
         }
     }
@@ -867,7 +1001,7 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
             }.sortedBy { it.displayOrder }
             Result.success(domain)
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to get support channels: ${e.message}")
+            Log.e(TAG, "Failed to get support channels")
             Result.success(emptyList())
         }
     }
@@ -893,7 +1027,7 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
                 try {
                     channel.unsubscribe()
                 } catch (e: Exception) {
-                    Log.e(TAG, "Unsubscribe error: ${e.message}")
+                    Log.e(TAG, "Unsubscribe error")
                 }
             }
         }
@@ -921,7 +1055,7 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
                 body = jsonResponse["body"]?.jsonPrimitive?.content ?: ""
             ))
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to get app content for $key: ${e.message}")
+            Log.e(TAG, "Failed to get app content for $key")
             Result.success(AppContent("", ""))
         }
     }
@@ -977,7 +1111,7 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
             }
             Result.success(domain)
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to get announcements: ${e.message}")
+            Log.e(TAG, "Failed to get announcements")
             Result.success(emptyList())
         }
     }
@@ -990,22 +1124,59 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
                     Log.d(TAG, "Login recorded successfully (background)")
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to record login (background): ${e.message}")
+                Log.e(TAG, "Failed to record login (background)")
             }
         }
         return Result.success(Unit)
     }
 
     override suspend fun touchPresence(clientId: String): Result<Unit> {
-        return try {
-            if (!ensureAuthSession()) return Result.failure(Exception("AUTH_FAILED"))
-            client.postgrest.rpc("touch_my_presence", buildJsonObject {
-                put("p_client_id", clientId)
-            })
-            Result.success(Unit)
-        } catch (e: Exception) {
-            Result.failure(e)
+        val now = System.currentTimeMillis()
+        if (now - lastPresenceTouchTime < 20000) {
+            Log.d(TAG, "Heartbeat throttled, skipping.")
+            return Result.success(Unit)
         }
+
+        if (!isPresenceJobRunning.compareAndSet(false, true)) {
+            Log.d(TAG, "Previous heartbeat is still running, skipping new heartbeat.")
+            return Result.success(Unit)
+        }
+
+        presenceScope.launch {
+            try {
+                if (authMutex.isLocked) {
+                    Log.d(TAG, "Heartbeat skipped: authMutex is locked.")
+                    return@launch
+                }
+
+                val currentStatus = client.auth.sessionStatus.value
+                if (currentStatus is SessionStatus.Initializing) {
+                    Log.d(TAG, "Heartbeat skipped: auth session is initializing.")
+                    return@launch
+                }
+
+                val session = client.auth.currentSessionOrNull()
+                val isExpired = session?.expiresAt?.let { it < kotlinx.datetime.Clock.System.now() } ?: true
+                if (session == null || isExpired) {
+                    Log.d(TAG, "Heartbeat skipped: session is invalid or expired.")
+                    return@launch
+                }
+
+                withTimeout(8000) {
+                    client.postgrest.rpc("touch_my_presence", buildJsonObject {
+                        put("p_client_id", clientId)
+                    })
+                }
+                lastPresenceTouchTime = System.currentTimeMillis()
+                Log.d(TAG, "Heartbeat presence touched successfully.")
+            } catch (e: Exception) {
+                Log.w(TAG, "Heartbeat RPC failed or timed out: ${e.message}")
+            } finally {
+                isPresenceJobRunning.set(false)
+            }
+        }
+
+        return Result.success(Unit)
     }
 
     override suspend fun clearPresence(clientId: String): Result<Unit> {
@@ -1036,7 +1207,7 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
             }
             Result.success(domain)
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to get admin user presence: ${e.message}")
+            Log.e(TAG, "Failed to get admin user presence")
             Result.failure(e)
         }
     }
@@ -1083,7 +1254,7 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
             }
             Result.success(domain)
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to get notifications: ${e.message}")
+            Log.e(TAG, "Failed to get notifications")
             Result.failure(e)
         }
     }
@@ -1102,6 +1273,63 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
         }
     }
 
+    override suspend fun getInvoiceForOrder(orderId: String): Result<InvoiceDto?> {
+        return try {
+            if (!ensureAuthSession()) return Result.failure(Exception("AUTH_FAILED"))
+            val invoice = client.from("invoices").select {
+                filter { eq("order_id", orderId) }
+                order("created_at", Order.DESCENDING)
+                limit(1)
+            }.decodeSingleOrNull<InvoiceDto>()
+            Result.success(invoice)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get invoice")
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun getPaymentForInvoice(invoiceId: String): Result<PaymentDto?> {
+        return try {
+            if (!ensureAuthSession()) return Result.failure(Exception("AUTH_FAILED"))
+            val payment = client.from("payments").select {
+                filter { eq("invoice_id", invoiceId) }
+                order("created_at", Order.DESCENDING)
+                limit(1)
+            }.decodeSingleOrNull<PaymentDto>()
+            Result.success(payment)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get payment")
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun submitCardToCardPayment(
+        invoiceId: String,
+        amount: Double,
+        payerFullName: String,
+        payerBank: String,
+        payerCardLast4: String,
+        paymentTrackingCode: String,
+        receiptPath: String?
+    ): Result<Unit> {
+        return try {
+            if (!ensureAuthSession()) return Result.failure(Exception("AUTH_FAILED"))
+            client.postgrest.rpc("submit_card_to_card_payment", buildJsonObject {
+                put("p_invoice_id", invoiceId)
+                put("p_amount", amount)
+                put("p_payer_full_name", payerFullName)
+                put("p_payer_bank", payerBank)
+                put("p_payer_card_last4", payerCardLast4)
+                put("p_tracking_code", paymentTrackingCode)
+                put("p_receipt_path", receiptPath ?: "")
+            })
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to submit payment")
+            Result.failure(e)
+        }
+    }
+
     override suspend fun getPriorityConfiguration(): List<PriorityConfig> {
         return try {
             if (!ensureAuthSession()) return emptyList()
@@ -1116,7 +1344,7 @@ class OnlineServiceRepositoryImpl(context: Context) : OnlineServiceRepository {
                 )
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to get priority configuration: ${e.message}")
+            Log.e(TAG, "Failed to get priority configuration")
             throw e
         }
     }

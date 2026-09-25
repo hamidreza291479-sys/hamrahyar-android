@@ -390,23 +390,49 @@ data class FormResponseDto(
 )
 
 @Serializable
+data class InvoiceItemDto(
+    val id: String? = null,
+    @SerialName("invoice_id") val invoiceId: String? = null,
+    val title: String,
+    val amount: Double,
+    val description: String? = null,
+    @SerialName("item_type") val itemType: String? = null,
+    @SerialName("is_variable") val isVariable: Boolean = false
+)
+
+@Serializable
 data class InvoiceDto(
     val id: String,
     @SerialName("order_id") val orderId: String,
+    val amount: Double = 0.0,
     @SerialName("base_amount") val baseAmount: Double,
+    @SerialName("discount_amount") val discountAmount: Double = 0.0,
+    @SerialName("variable_amount_sum") val variableAmountSum: Double = 0.0,
     @SerialName("total_amount") val totalAmount: Double,
     val status: String, // unpaid, paid, cancelled
-    @SerialName("created_at") val createdAt: String
+    @SerialName("created_at") val createdAt: String,
+    @SerialName("invoice_number") val invoiceNumber: String? = null,
+    @SerialName("service_name") val serviceName: String? = null,
+    @SerialName("account_title") val accountTitle: String? = null,
+    @SerialName("bank_name") val bankName: String? = null,
+    @SerialName("account_owner") val accountOwner: String? = null,
+    @SerialName("card_number") val cardNumber: String? = null,
+    val items: List<InvoiceItemDto> = emptyList()
 )
 
 @Serializable
 data class PaymentDto(
     val id: String? = null,
     @SerialName("invoice_id") val invoiceId: String,
-    @SerialName("order_id") val orderId: String,
+    @SerialName("order_id") val orderId: String? = null,
     val amount: Double,
-    val status: String, // pending_review, approved, rejected
-    @SerialName("payment_method") val paymentMethod: String,
+    val status: String, // pending, success, failed, pending_review, approved, rejected
+    @SerialName("payment_method") val paymentMethod: String? = "card_to_card",
     @SerialName("tracking_code") val trackingCode: String? = null,
+    @SerialName("payer_full_name") val payerFullName: String? = null,
+    @SerialName("payer_bank") val payerBank: String? = null,
+    @SerialName("payer_card_last4") val payerCardLast4: String? = null,
+    @SerialName("receipt_path") val receiptPath: String? = null,
+    @SerialName("rejection_reason") val rejectionReason: String? = null,
     @SerialName("created_at") val createdAt: String? = null
 )

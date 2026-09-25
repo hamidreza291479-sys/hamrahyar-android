@@ -121,7 +121,25 @@ fun AppNavigator(repository: OnlineServiceRepository) {
         screenStack = listOf(Screen.HOME)
     }
 
-    BackHandler(enabled = isSplashFinished) { navigateBack() }
+    var lastBackPressTime by remember { mutableLongStateOf(0L) }
+
+    BackHandler(enabled = true) {
+        if (screenStack.size > 1) {
+            navigateBack()
+        } else {
+            if (screenStack.lastOrNull() == Screen.SPLASH) {
+                (context as? android.app.Activity)?.finish()
+            } else {
+                val now = System.currentTimeMillis()
+                if (now - lastBackPressTime < 2000) {
+                    (context as? android.app.Activity)?.finishAffinity()
+                } else {
+                    lastBackPressTime = now
+                    Toast.makeText(context, "برای خروج دوباره دکمه برگشت را بزنید", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
 
     // Initial check for active order
     LaunchedEffect(Unit) {
@@ -220,6 +238,10 @@ fun AppNavigator(repository: OnlineServiceRepository) {
             }
             
             categories = repository.getCategories()
+            Log.d("AppNavigator", "Categories loaded: ${categories.size}")
+            categories.forEach { cat ->
+                Log.d("AppNavigator", "Category: ${cat.title}, services: ${cat.services.size}")
+            }
 
             // Forced recovery via guest key on startup
             preferenceManager.guestKey.first()?.let { key ->
@@ -249,6 +271,9 @@ fun AppNavigator(repository: OnlineServiceRepository) {
             }
         } catch (e: Exception) { 
             Log.e("AppNavigator", "Startup error: ${e.message}") 
+            scope.launch(kotlinx.coroutines.Dispatchers.Main) {
+                Toast.makeText(context, e.message ?: "خطا در بارگذاری اولیه", Toast.LENGTH_LONG).show()
+            }
         } finally {
             isDataLoading = false
         }

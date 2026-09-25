@@ -30,6 +30,7 @@ import com.lucifer.hamrahyar.ui.theme.Lalezar
 import com.lucifer.hamrahyar.ui.theme.Vazir
 import com.lucifer.hamrahyar.ui.theme.domain.repository.OnlineServiceRepository
 import com.lucifer.hamrahyar.ui.theme.utils.ProvinceCityData
+import com.lucifer.hamrahyar.ui.theme.utils.PlateUtils
 import com.lucifer.hamrahyar.ui.home.components.PlateInput
 import com.lucifer.hamrahyar.ui.theme.data.model.FormField
 import com.lucifer.hamrahyar.ui.theme.data.model.FormCondition
@@ -139,7 +140,15 @@ fun DynamicFormScreen(
                         visibleFields = visibleFields,
                         formValues = formValues,
                         onEdit = { isReviewMode = false },
-                        onSubmit = { onFormSubmit(buildJsonObject { formValues.forEach { (k, v) -> put(k, v) } }.toString()) }
+                        onSubmit = { 
+                            onFormSubmit(buildJsonObject { 
+                                formValues.forEach { (k, v) -> 
+                                    val field = visibleFields.find { it.realKey == k }
+                                    val isPlate = PlateUtils.isPlateType(field?.type)
+                                    put(k, if (isPlate) PlateUtils.clean(v) else v)
+                                } 
+                            }.toString()) 
+                        }
                     )
                 } else {
                     FormEditorView(
@@ -211,6 +220,7 @@ fun FormEditorView(
 
 fun isFormValid(fields: List<FormField>, formValues: Map<String, String>): Boolean {
     return fields.all { field ->
+        val canonicalType = field.type.trim().lowercase().replace("-", "_")
         val isRequired = if (field.requiredWhen != null) {
             val depValue = formValues[field.requiredWhen.field] ?: ""
             val targetValue = when (val eq = field.requiredWhen.equals) {
@@ -220,12 +230,27 @@ fun isFormValid(fields: List<FormField>, formValues: Map<String, String>): Boole
             depValue == targetValue
         } else field.required
         
+        val value = formValues[field.realKey]
+        
         if (isRequired) {
-            val value = formValues[field.realKey]
-            !value.isNullOrBlank() && value != "false"
-        } else true
+            if (value.isNullOrBlank() || value == "false") return false
+            
+            // Basic validation for special types if present in initial form
+            when (canonicalType) {
+                "number", "numeric" -> if (!value.all { it.isDigit() }) return false
+                "time", "timed" -> if (!value.matches(Regex("^([01]\\d|2[0-3]):[0-5]\\d$"))) return false
+                "plate", "plate_vehicle", "plate_motorcycle", "vehicle_plate", "motorcycle_plate" -> if (value.isBlank()) return false
+            }
+        } else if (!value.isNullOrBlank()) {
+             when (canonicalType) {
+                "number", "numeric" -> if (!value.all { it.isDigit() }) return false
+                "time", "timed" -> if (!value.matches(Regex("^([01]\\d|2[0-3]):[0-5]\\d$"))) return false
+            }
+        }
+        true
     }
 }
+
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -233,10 +258,11 @@ fun RenderField(field: FormField, formValues: MutableMap<String, String>, error:
     val value = formValues[field.realKey] ?: ""
     val label = field.label + if (field.required) " *" else ""
     val isError = error != null
+    val canonicalType = remember(field.type) { field.type.trim().lowercase().replace("-", "_") }
 
     Column(modifier = Modifier.fillMaxWidth()) {
-        when (field.type) {
-            "text", "number" -> {
+        when (canonicalType) {
+            "text", "number", "numeric" -> {
                 Text(label, fontFamily = Vazir, fontSize = 13.sp, color = if (isError) Color.Red else Color.White.copy(alpha = 0.7f), modifier = Modifier.padding(bottom = 8.dp))
                 OutlinedTextField(
                     value = value,
@@ -244,7 +270,7 @@ fun RenderField(field: FormField, formValues: MutableMap<String, String>, error:
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(16.dp),
                     isError = isError,
-                    keyboardOptions = KeyboardOptions(keyboardType = if (field.type == "number") KeyboardType.Number else KeyboardType.Text),
+                    keyboardOptions = KeyboardOptions(keyboardType = if (canonicalType == "number" || canonicalType == "numeric") KeyboardType.Number else KeyboardType.Text),
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedBorderColor = Color(0xFFa29bfe),
                         unfocusedBorderColor = Color.White.copy(alpha = 0.2f),
@@ -278,7 +304,7 @@ fun RenderField(field: FormField, formValues: MutableMap<String, String>, error:
                     )
                 )
             }
-            "select" -> {
+            "select", "delivery_method" -> {
                 var expanded by remember { mutableStateOf(false) }
                 val options = field.options ?: emptyList()
                 ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = !expanded }) {
@@ -375,8 +401,8 @@ fun RenderField(field: FormField, formValues: MutableMap<String, String>, error:
                     }
                 }
             }
-            "plate" -> {
-                PlateInput(initialValue = value, onValueChange = { formValues[field.realKey] = it }, label = label, plateType = field.label)
+            "plate", "plate_vehicle", "plate_motorcycle" -> {
+                PlateInput(initialValue = value, onValueChange = { formValues[field.realKey] = it }, label = label, plateType = if (canonicalType == "plate_motorcycle") "موتور" else "خودرو")
             }
             "date" -> {
                 Text(label, fontFamily = Vazir, fontSize = 13.sp, color = if (isError) Color.Red else Color.White.copy(alpha = 0.7f), modifier = Modifier.padding(bottom = 8.dp))
@@ -396,7 +422,7 @@ fun RenderField(field: FormField, formValues: MutableMap<String, String>, error:
                     )
                 )
             }
-            "time" -> {
+            "time", "timed" -> {
                 Text(label, fontFamily = Vazir, fontSize = 13.sp, color = if (isError) Color.Red else Color.White.copy(alpha = 0.7f), modifier = Modifier.padding(bottom = 8.dp))
                 OutlinedTextField(
                     value = value,
@@ -414,12 +440,16 @@ fun RenderField(field: FormField, formValues: MutableMap<String, String>, error:
                     )
                 )
             }
+            else -> {
+                Text("نوع فیلد '${field.type}' در فرم اولیه پشتیبانی نمی‌شود.", color = Color.Gray, fontSize = 11.sp, fontFamily = Vazir)
+            }
         }
         if (isError && error?.message != null) {
             Text(error.message, color = Color.Red, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp, start = 8.dp))
         }
     }
 }
+
 
 @Composable
 fun ReviewView(
